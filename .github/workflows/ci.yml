@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Repository consistency
+        run: |
+          pip install --quiet jsonschema
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            python3 -I tests/check_repo.py --base "origin/${{ github.base_ref }}"
+          else
+            python3 -I tests/check_repo.py
+          fi
+
+      - name: Shell scripts
+        run: |
+          bash -n plugins/conclave/bin/*.sh
+          shellcheck --severity=warning plugins/conclave/bin/*.sh
+
+      - name: Guardrail hooks
+        run: python3 -I plugins/conclave/hooks/test_guard.py
+
+      - name: Workflow scripts
+        run: node tests/workflows.test.mjs
+
+      - name: Plugin and marketplace manifests
+        run: |
+          npm install --global --silent @anthropic-ai/claude-code
+          claude plugin validate plugins/conclave
+          claude plugin validate .

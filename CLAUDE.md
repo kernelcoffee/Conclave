@@ -42,6 +42,8 @@ $CLAUDE plugin validate .                       # marketplace
 $CLAUDE --plugin-dir plugins/conclave           # try the plugin in a session; /reload-plugins after edits
 bash -n plugins/conclave/bin/*.sh && shellcheck plugins/conclave/bin/*.sh
 python3 -I plugins/conclave/hooks/test_guard.py      # guardrail rules, offline
+python3 -I tests/check_repo.py --base origin/main   # JSON, schema, packs, version bump
+node tests/workflows.test.mjs                       # workflow control flow
 ```
 
 Workflow scripts use top-level `return`, which `node --check` rejects on its own. To
@@ -73,4 +75,6 @@ with `const meta`, in a scratch copy.
 - Conventional commit subjects with a scope: `feat(agents): …`, `fix(workflow): …`,
   `docs: …`, `chore: …`.
 - Bump `version` in both `plugins/conclave/.claude-plugin/plugin.json` and
-  `.claude-plugin/marketplace.json` together.
+  `.claude-plugin/marketplace.json` together, in every change that touches `plugins/`:
+  installs are cached by version, so an unchanged version never reaches users. CI
+  (`.github/workflows/ci.yml`) fails a pull request that forgets.

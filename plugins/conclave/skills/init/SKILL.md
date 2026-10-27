@@ -6,7 +6,12 @@ user-invocable: true
 ---
 Write `.claude/conclave.json` for the current project. The profile is the only per-project artifact the Conclave team needs; everything the agents used to hard-code (paths, commands, stacks, stakes) lives here.
 
-Arguments: `$ARGUMENTS`. If the file already exists and `--force` is not given, read it, report what is there, and stop.
+Arguments: `$ARGUMENTS`. If the file already exists and `--force` is not given, do not rewrite it. Instead:
+
+1. Validate it against `${CLAUDE_PLUGIN_ROOT}/schemas/conclave.schema.json` (same command as in step 2) and report any error with the path of the offending key.
+2. Compare it with `${CLAUDE_PLUGIN_ROOT}/templates/conclave.json` and list the keys the template has that the profile lacks, one line each with what it does (from the schema `description`). These are features added by a newer Conclave; they are optional and default to off.
+3. Check that every command in `checks`, `build` and `e2e` still exists (the script or binary is there) and that every `paths` entry still exists; report what moved.
+4. Stop. The user edits the profile, or runs `/conclave:init --force` to regenerate it.
 
 ## 1. Scan
 

@@ -15,6 +15,8 @@ import tempfile
 from pathlib import Path
 
 GUARD = Path(__file__).resolve().parent / "guard.py"
+sys.path.insert(0, str(GUARD.parent))
+from guard import SAFE_HOME_USERS  # noqa: E402
 HOME = Path.home()
 FAILS = []
 PASSES = 0
@@ -436,7 +438,7 @@ def main():
         expect("write non-luhn digits", "pre", pre("Write", {"file_path": str(proj / "t.py"), "content": "n = '1234 5678 9012 3456'\n"}, proj), 0, env)
         expect("write iban", "pre", pre("Write", {"file_path": str(proj / "t.py"), "content": "iban = 'FR76 3000 6000 " + "0112 3456 7890 189'\n"}, proj), 2, env)
         expect("write ssn", "pre", pre("Write", {"file_path": str(proj / "t.py"), "content": "ssn = '123-45" + "-6789'\n"}, proj), 2, env)
-        expect("write local home", "pre", pre("Write", {"file_path": str(proj / "t.md"), "content": f"see {HOME}/notes\n"}, proj), 2 if HOME.name.lower() not in ("user", "root") else 0, env)
+        expect("write local home", "pre", pre("Write", {"file_path": str(proj / "t.md"), "content": f"see {HOME}/notes\n"}, proj), 0 if HOME.name.lower() in SAFE_HOME_USERS | {"root"} else 2, env)
         expect("commit message email", "pre", sh(f"git commit -m 'fix: thanks {realmail}'", proj), 2, env)
         expect("commit message trailer ok", "pre", sh("git commit -m 'fix: x' -m 'Co-Authored-By: Claude <noreply@anthropic.com>'", proj), 0, env)
         expect("curl post with email", "pre", sh(f"curl -d 'email={realmail}' http://localhost:8000/x", proj), 2, env)

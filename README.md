@@ -30,7 +30,21 @@ claude plugin marketplace add kernelcoffee/Conclave
 claude plugin install conclave@conclave
 ```
 
-Update later with `claude plugin marketplace update conclave`.
+### Updating
+
+```bash
+claude plugin marketplace update conclave     # fetch the new catalog
+claude plugin update conclave@conclave        # install the new version
+```
+
+Restart Claude Code (or run `/reload-plugins`) to load it. An update is picked up only
+when the version number changes; every release bumps it.
+
+You do not need to run `/conclave:init` again. The profile in each project belongs to
+that project and keeps working: new profile keys are optional and default to off. To see
+what a new version offers, run `/conclave:init` without `--force`: on an existing profile
+it validates it against the current schema, lists the keys you do not use yet, and
+reports check commands or paths that no longer exist. It changes nothing.
 
 From a local clone, for development:
 
@@ -48,6 +62,14 @@ claude --plugin-dir /path/to/Conclave/plugins/conclave
 
 then `/reload-plugins` after editing an agent, skill or workflow. Validate with
 `claude plugin validate plugins/conclave` from the clone.
+
+Tests, the same ones CI runs on every push and pull request:
+
+```bash
+python3 -I tests/check_repo.py                    # JSON, schema, stack packs, versions
+python3 -I plugins/conclave/hooks/test_guard.py   # guardrail rules
+node tests/workflows.test.mjs                     # workflow control flow, fake agents
+```
 
 ## Quick start
 

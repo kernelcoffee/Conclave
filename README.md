@@ -203,7 +203,7 @@ and frozen contract tests are enforced mechanically, not by prose.
 | `stack-cpp` | Standard modern C++: const and initialisation discipline, ownership and RAII, strong types, warnings as errors, sanitizers, clang-tidy, ctest |
 | `stack-qt6` | Qt 6 on its own terms: object tree, signals and slots, threads and event loops, QML/C++ boundary, Qt SQL, Qt Test, clazy, qmllint |
 | `stack-qt5` | Legacy Qt 5.15: what still applies, what is deprecated or missing, forward compatibility, qmake |
-| `stack-rust` | Ownership, error handling, async, unsafe, cargo clippy, cargo test, llvm-cov |
+| `stack-rust` | Edition 2024 rules, ownership, error handling, async, unsafe, cargo clippy, cargo test, llvm-cov |
 | `stack-lua` | Addon and script idioms, globals, event handlers, busted |
 | `stack-shell` | bash strict mode, quoting, portability, shellcheck, bats |
 | `stack-generic` | Fallback checklist for stacks without a pack |

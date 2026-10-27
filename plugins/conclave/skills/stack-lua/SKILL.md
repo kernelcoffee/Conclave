@@ -1,12 +1,19 @@
 ---
 name: stack-lua
-description: Knowledge pack for Lua 5.1 to 5.4 code, including World of Warcraft addons: idioms, review checklist, testing, tooling, pitfalls. Loaded by Conclave devs, challengers, reviewers and the lead.
+description: Knowledge pack for Lua 5.1 to 5.5 code, including World of Warcraft addons: idioms, review checklist, testing, tooling, pitfalls. Loaded by Conclave devs, challengers, reviewers and the lead.
 user-invocable: false
 ---
 # Lua stack pack
 
 Applies to plain Lua scripts and libraries, and to embedded Lua such as World of Warcraft
 addons (Lua 5.1 with the WoW API, frames, events and saved variables).
+
+The interpreter version decides what exists; check it before using a feature. 5.1 and
+LuaJIT: `setfenv`/`getfenv`, `unpack`, no integers, no `goto`. 5.2: `_ENV` replaces
+`setfenv`, `goto`, `table.unpack`. 5.3: integers and bitwise operators, `utf8`. 5.4:
+`<const>` and `<close>` locals, generational GC. 5.5: explicit `global` declarations
+(once a scope declares globals, undeclared names are an error) and read-only `for` loop
+control variables. WoW addons stay on 5.1 whatever the current Lua is.
 
 ## Idioms
 

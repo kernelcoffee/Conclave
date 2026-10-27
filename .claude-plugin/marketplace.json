@@ -7,7 +7,7 @@
       "name": "conclave",
       "source": "./plugins/conclave",
       "description": "PM, architect, developers, challengers, reviewers, refuter, test engineer, QA, docs writer, devops and UX, orchestrated by a token-aware lead.",
-      "version": "0.2.0"
+      "version": "0.2.1"
     }
   ]
 }

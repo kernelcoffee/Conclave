@@ -1,11 +1,16 @@
 ---
 name: stack-rust
-description: Knowledge pack for Rust 2021 crates, binaries and tokio services: idioms, review checklist, testing, tooling, pitfalls. Loaded by Conclave devs, challengers, reviewers and the lead.
+description: Knowledge pack for Rust (2024 edition, 2021 still common) crates, binaries and tokio services: idioms, review checklist, testing, tooling, pitfalls. Loaded by Conclave devs, challengers, reviewers and the lead.
 user-invocable: false
 ---
 # Rust stack pack
 
 Applies to Rust crates and binaries, synchronous or async on tokio, built with cargo.
+The crate's `edition` in `Cargo.toml` decides the language rules; new crates use 2024,
+and 2021 crates are still common. Never change a crate's edition as a side effect of a
+task; an edition migration is its own change (`cargo fix --edition`, then review).
+`rust-version` in `Cargo.toml` is the minimum supported Rust; do not use APIs newer than
+it.
 
 ## Idioms
 
@@ -36,6 +41,14 @@ Applies to Rust crates and binaries, synchronous or async on tokio, built with c
   example that compiles as a doctest.
 
 ## Review checklist
+
+- Edition 2024 rules, in a 2024 crate: `extern` blocks are `unsafe extern` and their items
+  say `safe` or `unsafe`; `#[no_mangle]`, `#[export_name]` and `#[link_section]` are
+  written `#[unsafe(...)]`; `std::env::set_var` and `remove_var` are `unsafe` and need a
+  `// SAFETY:` comment; references to `static mut` are a hard error (use atomics,
+  `Mutex`, `OnceLock` or `&raw const`); unsafe operations inside an `unsafe fn` need
+  their own `unsafe {}` block; `impl Trait` in return position captures every in-scope
+  lifetime unless narrowed with `use<..>`; `gen` is a reserved keyword.
 
 - `unwrap()`, `expect()`, `panic!`, `todo!`, `unimplemented!` on a reachable path in
   library code or request handling.
@@ -80,6 +93,11 @@ Applies to Rust crates and binaries, synchronous or async on tokio, built with c
 - `cargo nextest run` where installed for faster, isolated test runs.
 
 ## Pitfalls
+
+- Edition 2024 temporary scopes: the temporaries in an `if let` scrutinee and in a block's
+  tail expression are dropped earlier than in 2021, so a lock guard or `RefCell` borrow
+  that used to live through the `else` branch or the end of the block no longer does;
+  a change that moves code between crates of different editions can change drop order.
 
 - `.await` inside a `std::sync::Mutex` guard, deadlocking the runtime under load.
 - `tokio::spawn` of a future that is not `Send` because it holds a `Rc` or a non-Send guard.

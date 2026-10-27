@@ -1,0 +1,98 @@
+{
+  "$schema": "https://raw.githubusercontent.com/kernelcoffee/Conclave/main/plugins/conclave/schemas/conclave.schema.json",
+  "name": "MyProject",
+  "base": "origin/main",
+  "summary": "One or two sentences: what the project is and who runs it.",
+
+  "components": [
+    {
+      "name": "backend",
+      "paths": ["backend/"],
+      "tests": ["backend/tests/"],
+      "stacks": ["python", "fastapi"],
+      "checks": [
+        "cd backend && .venv/bin/ruff check .",
+        "cd backend && .venv/bin/python -m pytest -q"
+      ],
+      "setup": ["cd backend && python -m venv .venv && .venv/bin/pip install -e '.[dev]'"],
+      "coverage": {
+        "command": "cd backend && .venv/bin/python -m pytest -q --cov=src --cov-report=xml:coverage.xml --cov-report=",
+        "report": "backend/coverage.xml"
+      },
+      "pitfalls": [
+        "Example: one asyncio subprocess per job, never a thread per job."
+      ],
+      "conventions": [
+        "Example: all database access goes through repositories/."
+      ]
+    },
+    {
+      "name": "frontend",
+      "paths": ["frontend/"],
+      "tests": ["frontend/src/**/*.test.ts", "frontend/src/**/*.test.tsx", "frontend/e2e/"],
+      "stacks": ["typescript", "react"],
+      "ui": true,
+      "checks": [
+        "npm --prefix frontend run lint",
+        "npm --prefix frontend test"
+      ],
+      "build": ["npm --prefix frontend run build"],
+      "e2e": ["npm --prefix frontend run test:e2e"],
+      "setup": ["npm --prefix frontend ci"],
+      "coverage": {
+        "command": "npm --prefix frontend run -s test:coverage",
+        "report": "frontend/coverage/cobertura-coverage.xml",
+        "src_root": "frontend",
+        "include": ["frontend/src/lib/**", "frontend/src/hooks/**", "frontend/src/api/**"]
+      }
+    }
+  ],
+
+  "contracts": [["backend", "frontend"]],
+
+  "stakes": "loses user data, breaks a running instance, or ships a security hole",
+  "security": {
+    "threat_model": "Who can reach the app, what they can send, and what must never leak.",
+    "secrets": []
+  },
+
+  "docs": {
+    "paths": ["docs/", "README.md"],
+    "never": ["CLAUDE.md"],
+    "roadmap": "docs/functional.md"
+  },
+
+  "devops": {
+    "paths": [".github/", "Dockerfile", "docker-compose.yml", "docker-compose.dev.yml", "scripts/"],
+    "container": "docker",
+    "ci": ".github/workflows/ci.yml",
+    "release": ["backend/pyproject.toml", "frontend/package.json"]
+  },
+
+  "gates": {
+    "coverage_changed_lines": 95,
+    "shortcut_audit": true,
+    "flake_runs": 3,
+    "extra": [],
+    "mutation_probes": false
+  },
+
+  "git": {
+    "commit_style": "conventional",
+    "coauthor": false,
+    "branch_prefix": "dev/"
+  },
+
+  "models": {
+    "planners": "inherit",
+    "workers": "opus",
+    "reviewers": "opus",
+    "mechanical": "sonnet"
+  },
+
+  "tier_overrides": {
+    "risky_paths": ["backend/alembic/", "backend/src/db/"],
+    "contract_by_default": false,
+    "design_duel_by_default": false
+  }
+}

@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kernelcoffee/Conclave/plugins/conclave/schemas/conclave.schema.json",
+  "title": "Conclave project profile",
+  "description": "Per-project description of the components, stacks, checks and gates the Conclave team works with. Lives at .claude/conclave.json in the project.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "base", "components"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "name": { "type": "string", "description": "Project name as the agents should call it." },
+    "base": { "type": "string", "description": "Git ref every diff, coverage gate and audit compares against (e.g. origin/main).", "default": "origin/main" },
+    "summary": { "type": "string", "description": "One or two sentences on what the project is and who runs it. Shown to every agent." },
+    "components": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Independently buildable parts of the project. One dev and one challenger run per touched component.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "paths", "stacks", "checks"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "paths": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "Directory prefixes (end with /) or globs this component owns. Used to route findings to the right dev." },
+          "tests": { "type": "array", "items": { "type": "string" }, "description": "Directories or globs where tests live. Challengers and the test engineer may only write here." },
+          "stacks": { "type": "array", "minItems": 1, "items": { "type": "string", "enum": ["python", "fastapi", "typescript", "react", "cpp", "qt6", "qt5", "rust", "lua", "shell", "generic"] }, "description": "Stack packs (skills/stack-<name>) the roles load for this component." },
+          "ui": { "type": "boolean", "default": false, "description": "True when the component renders a user interface; adds the ux role as consultant and reviewer." },
+          "checks": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "Fast checks the dev runs before reporting, in order (lint, typecheck, unit tests). Shell commands run from the repo root." },
+          "build": { "type": "array", "items": { "type": "string" }, "description": "Full build commands QA runs (e.g. cmake --build, npm run build)." },
+          "e2e": { "type": "array", "items": { "type": "string" }, "description": "Slow end-to-end suites QA runs after the fast checks." },
+          "coverage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["command", "report"],
+            "properties": {
+              "command": { "type": "string", "description": "Produces a Cobertura XML or lcov report." },
+              "report": { "type": "string", "description": "Path of the report the command writes, relative to the repo root." },
+              "src_root": { "type": "string", "description": "Passed to diff-cover --src-root when report paths are relative to a subdirectory." },
+              "include": { "type": "array", "items": { "type": "string" }, "description": "Globs limiting which files the gate judges (e.g. logic modules only)." }
+            }
+          },
+          "setup": { "type": "array", "items": { "type": "string" }, "description": "Commands that make checks runnable when the environment is cold (venv creation, npm ci). Agents run these only when a check fails for a missing tool." },
+          "pitfalls": { "type": "array", "items": { "type": "string" }, "description": "Things this codebase gets wrong under pressure. Fed verbatim to the dev, challenger and reviewers." },
+          "conventions": { "type": "array", "items": { "type": "string" }, "description": "Project rules beyond CLAUDE.md that reviewers enforce (layering, naming, migration policy)." }
+        }
+      }
+    },
+    "contracts": {
+      "type": "array",
+      "description": "Pairs of component names that talk to each other through an interface the architect must specify and the devs cross-check.",
+      "items": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "string" } }
+    },
+    "stakes": { "type": "string", "description": "What a severity-high defect does to a real user of this project. Completes the sentence 'high = ...'." },
+    "security": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "threat_model": { "type": "string", "description": "Who the attacker is, what they can reach, and what must never leak." },
+        "secrets": { "type": "array", "items": { "type": "string" }, "description": "Names of secrets or tokens that must never appear in logs, tests or fixtures." }
+      }
+    },
+    "docs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "paths": { "type": "array", "items": { "type": "string" }, "description": "Files and directories the docs-writer owns." },
+        "never": { "type": "array", "items": { "type": "string" }, "description": "Files no agent edits (often CLAUDE.md)." },
+        "roadmap": { "type": "string", "description": "File that holds the todo list or roadmap table, if any." }
+      }
+    },
+    "devops": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "paths": { "type": "array", "items": { "type": "string" }, "description": "CI, container, packaging and release files the devops role owns." },
+        "container": { "type": "string", "enum": ["docker", "podman", "none"], "default": "none" },
+        "ci": { "type": "string", "description": "Path of the CI definition, e.g. .github/workflows/ci.yml." },
+        "release": { "type": "array", "items": { "type": "string" }, "description": "Files whose version fields must be bumped together on release." }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "coverage_changed_lines": { "type": "integer", "minimum": 0, "maximum": 100, "description": "Minimum percent of added or modified lines that must be covered. Omit to disable the gate." },
+        "shortcut_audit": { "type": "boolean", "default": true, "description": "Run bin/shortcut-audit.sh on the diff." },
+        "flake_runs": { "type": "integer", "minimum": 1, "default": 3, "description": "How many times QA re-runs changed test files to catch flakes." },
+        "extra": { "type": "array", "items": { "type": "string" }, "description": "Additional gate commands; non-zero exit is red." },
+        "mutation_probes": { "type": "boolean", "default": false, "description": "The test-auditor sabotages the implementation once per contract test and requires the test to fail; costly on compiled stacks." }
+      }
+    },
+    "git": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "commit_style": { "type": "string", "enum": ["conventional", "plain"], "default": "conventional" },
+        "scopes": { "type": "array", "items": { "type": "string" }, "description": "Allowed conventional-commit scopes, if the project restricts them." },
+        "coauthor": { "type": "boolean", "default": false, "description": "Whether to add a Co-Authored-By trailer." },
+        "branch_prefix": { "type": "string", "description": "Prefix for feature branches, e.g. dev/." }
+      }
+    },
+    "models": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-role model overrides. Keys are role names (lead, pm, architect, dev, challenger, reviewer, refuter, test-engineer, qa, docs-writer, devops, ux) or the groups planners, workers, reviewers, mechanical.",
+      "patternProperties": {
+        "^[a-z-]+$": { "type": "string", "enum": ["inherit", "fable", "opus", "sonnet", "haiku"] }
+      }
+    },
+    "tier_overrides": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Nudges for the lead's triage.",
+      "properties": {
+        "min_tier": { "type": "integer", "minimum": 0, "maximum": 3, "description": "Never go below this tier for code changes." },
+        "always_review": { "type": "boolean", "description": "Run reviewer-correctness even at T0 when a code file changes." },
+        "risky_paths": { "type": "array", "items": { "type": "string" }, "description": "Paths that bump any task touching them to at least T2 (migrations, auth, payment, file deletion)." },
+        "contract_by_default": { "type": "boolean", "default": false, "description": "Run T3 in contract mode (test-first contract tests, audited and frozen) unless the lead is told otherwise." },
+        "design_duel_by_default": { "type": "boolean", "default": false, "description": "Run T3 with a design duel (two dev designs, cross-critique, the architect judges) unless the lead is told otherwise." }
+      }
+    }
+  }
+}

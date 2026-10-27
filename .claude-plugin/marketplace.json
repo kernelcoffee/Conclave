@@ -1,0 +1,13 @@
+{
+  "name": "conclave",
+  "owner": { "name": "Alexandre Moore" },
+  "metadata": { "description": "A full software team of Claude Code agents, driven by a lead that sizes each task before spending tokens." },
+  "plugins": [
+    {
+      "name": "conclave",
+      "source": "./plugins/conclave",
+      "description": "PM, architect, developers, challengers, reviewers, refuter, test engineer, QA, docs writer, devops and UX, orchestrated by a token-aware lead.",
+      "version": "0.1.0"
+    }
+  ]
+}

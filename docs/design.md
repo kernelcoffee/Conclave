@@ -205,6 +205,13 @@ assistant text before it is shown, so the output rule works on hand-backs and fi
 messages, not on streaming text. Bash rules parse the command text (pipes, `&&`,
 `sh -c`, `git -C`), which is a tripwire, not a boundary.
 
+Two rules do not deny. `commit-approval` returns `permissionDecision: ask` for commit,
+push, tag and publishing `gh` commands from the main session, collected during the
+checks and emitted only when no other rule denied the same call; in a headless run the
+ask resolves to not approved. `pii` denies personal or identifiable values in what is
+written, staged, committed, published or sent, never in what is read or shown to the
+user in the session.
+
 Rules and overrides are documented in the README; the rule names are stable because
 `CONCLAVE_ALLOW` refers to them. Adding a rule: a `check_*` function in `guard.py`, a
 `deny("<rule>", ...)` call with a reason that never contains the matched value, cases

@@ -405,6 +405,51 @@ def main():
         expect("git add . clean", "pre", sh("git add .", proj), 0, env)
         expect("git commit -a clean", "pre", sh("git commit -am x", proj), 0, env)
 
+        # ---- commit-approval: main-session commit/push ask; subagents still denied
+        rc, out, err = run("pre", sh("git commit -m 'feat: y'", proj), env)
+        check("commit asks", rc == 0 and '"permissionDecision": "ask"' in out and "commit-approval" in out, rc, out)
+        rc, out, err = run("pre", sh("git push -u origin dev/topic", proj), env)
+        check("push asks", rc == 0 and '"ask"' in out, rc, out)
+        rc, out, err = run("pre", sh("git push -u origin dev/topic", proj), {**env, "CONCLAVE_ALLOW": "commit-approval"})
+        check("push allowed by env", rc == 0 and out.strip() == "", rc, out)
+        rc, out, err = run("pre", sh("git status && git log -1", proj), env)
+        check("status no ask", rc == 0 and out.strip() == "", rc, out)
+        rc, out, err = run("pre", sh("gh pr create --title x --body 'adds y'", proj), env)
+        check("gh pr create asks", rc == 0 and '"ask"' in out, rc, out)
+        expect("gh pr create from subagent", "pre", sh("gh pr create --title x --body y", proj, agent_id="a"), 2, env)
+        expect("push main still denied", "pre", sh("git push origin main", proj), 2, env)
+
+        # ---- pii
+        realmail = "jane.doe" + "@" + "gmail.com"
+        expect("write email", "pre", pre("Write", {"file_path": str(proj / "src" / "c.py"), "content": f"OWNER = '{realmail}'\n"}, proj), 2, env)
+        expect("write example email", "pre", pre("Write", {"file_path": str(proj / "src" / "c.py"), "content": "OWNER = 'alice@example.com'\nX='noreply@anthropic.com'\n"}, proj), 0, env)
+        expect("write noreply github", "pre", pre("Write", {"file_path": str(proj / "src" / "c.py"), "content": "a = '12345+bob@users.noreply.github.com'\n"}, proj), 0, env)
+        expect("write email to LICENSE", "pre", pre("Write", {"file_path": str(proj / "LICENSE"), "content": f"Copyright Jane Doe <{realmail}>\n"}, proj), 0, env)
+        expect("write email allowlisted", "pre", pre("Write", {"file_path": str(proj / "SECURITY.md"), "content": f"Report to {realmail}\n"}, proj), 0, {**env, "CONCLAVE_PII_ALLOW": realmail})
+        expect("write phone", "pre", pre("Write", {"file_path": str(proj / "docs.md"), "content": "Call +" + "33 6 12 34 56 78\n"}, proj), 2, env)
+        expect("write version not phone", "pre", pre("Write", {"file_path": str(proj / "c.py"), "content": "x = 1234567890\nv = '2.1.311'\nport = 8080\n"}, proj), 0, env)
+        expect("write home path", "pre", pre("Write", {"file_path": str(proj / "README.md"), "content": "Run /home/" + "janedoe/Work/x/run.sh\n"}, proj), 2, env)
+        expect("write mac home path", "pre", pre("Write", {"file_path": str(proj / "README.md"), "content": "cd /Users/" + "jdoe/src\n"}, proj), 2, env)
+        expect("write placeholder home", "pre", pre("Write", {"file_path": str(proj / "README.md"), "content": "cd /home/user/src && ls ~/projects\n"}, proj), 0, env)
+        expect("write card", "pre", pre("Write", {"file_path": str(proj / "t.py"), "content": "card = '4539 1488 " + "0343 6467'\n"}, proj), 2, env)
+        expect("write public test card", "pre", pre("Write", {"file_path": str(proj / "t.py"), "content": "card = '4111 1111 1111 1111'\n"}, proj), 0, env)
+        expect("write non-luhn digits", "pre", pre("Write", {"file_path": str(proj / "t.py"), "content": "n = '1234 5678 9012 3456'\n"}, proj), 0, env)
+        expect("write iban", "pre", pre("Write", {"file_path": str(proj / "t.py"), "content": "iban = 'FR76 3000 6000 " + "0112 3456 7890 189'\n"}, proj), 2, env)
+        expect("write ssn", "pre", pre("Write", {"file_path": str(proj / "t.py"), "content": "ssn = '123-45" + "-6789'\n"}, proj), 2, env)
+        expect("write local home", "pre", pre("Write", {"file_path": str(proj / "t.md"), "content": f"see {HOME}/notes\n"}, proj), 2 if HOME.name.lower() not in ("user", "root") else 0, env)
+        expect("commit message email", "pre", sh(f"git commit -m 'fix: thanks {realmail}'", proj), 2, env)
+        expect("commit message trailer ok", "pre", sh("git commit -m 'fix: x' -m 'Co-Authored-By: Claude <noreply@anthropic.com>'", proj), 0, env)
+        expect("curl post with email", "pre", sh(f"curl -d 'email={realmail}' http://localhost:8000/x", proj), 2, env)
+        expect("gh pr body email", "pre", sh(f"gh pr create --title x --body 'ping {realmail}'", proj), 2, env)
+        (proj / "src" / "who.py").write_text(f"AUTHOR = '{realmail}'\n")
+        expect("git add file with email", "pre", sh("git add src/who.py", proj), 2, env)
+        g("add", "src/who.py")
+        expect("git commit staged email", "pre", sh("git commit -m x", proj), 2, env)
+        g("reset", "-q", "--", "src/who.py")
+        (proj / "src" / "who.py").unlink()
+        g("config", "user.name", "Jane Q Tester")
+        expect("write local git name", "pre", pre("Write", {"file_path": str(proj / "t.md"), "content": "Maintained by Jane Q Tester\n"}, proj), 2, env)
+
         # ---- post: redaction
         rc, out, err = run(
             "post",
@@ -493,6 +538,14 @@ def main():
     for f in FAILS:
         print("  FAIL", f)
     sys.exit(1 if FAILS else 0)
+
+
+def check(label, ok, rc, out):
+    global PASSES
+    if ok:
+        PASSES += 1
+    else:
+        FAILS.append(f"{label}: rc={rc} out={out.strip()[:200]!r}")
 
 
 def PASSES_inc():

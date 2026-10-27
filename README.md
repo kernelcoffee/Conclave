@@ -134,7 +134,8 @@ launched directly with `args: { profile, exec }`; see `docs/design.md` for `exec
 The plugin ships hooks the harness runs on every tool call, in the main session and in
 every subagent. They block outright, with the rule name and the reason, and never
 echo a matched value. Overrides come only from the environment Claude Code was started
-with (`CONCLAVE_ALLOW=rule,rule`, `CONCLAVE_ALLOWED_HOSTS=host,host`); an inline
+with (`CONCLAVE_ALLOW=rule,rule`, `CONCLAVE_ALLOWED_HOSTS=host,host`,
+`CONCLAVE_PII_ALLOW=value,value`); an inline
 `CONCLAVE_*=` assignment on a command is itself denied.
 
 | Rule | Blocks |
@@ -148,6 +149,8 @@ with (`CONCLAVE_ALLOW=rule,rule`, `CONCLAVE_ALLOWED_HOSTS=host,host`); an inline
 | `destructive-command` | `rm -r` outside the project or on its root, `sudo`, `git clean -f`, wholesale `checkout --`/`restore .`, `stash drop`, `git config --global`, global package installs, writes to home config or system directories, piping downloads into a shell |
 | `stay-in-project` | Write/Edit or a writing shell command outside the project directory (temp dirs, the scratchpad and `~/.claude` are allowed) |
 | `no-secret-in-output` | a subagent hand-back or a final message that contains a secret-looking value; the author is sent back to rewrite it |
+| `commit-approval` | nothing is blocked: `git commit`, `push`, `tag` and publishing `gh` commands (pr, issue, release, gist) from the main session always raise a permission prompt, even in auto mode; set `CONCLAVE_ALLOW=commit-approval` when you want the session to commit on its own |
+| `pii` | personal or identifiable information in written files, staged changes, commit messages, `gh` text or data sent out: email addresses, phone numbers, home-directory paths naming a user, card, IBAN or national id numbers, and this machine's own git name, git email and home path. Placeholders (`user@example.com`, `/home/user`, `noreply` addresses) pass; `LICENSE`, `AUTHORS`, `CODEOWNERS` and similar files are exempt; a public contact goes in `CONCLAVE_PII_ALLOW` |
 
 Tool results from Bash, Read and Grep are scanned too: secret-looking values are
 replaced with `[REDACTED <kind>]` before the model sees them. This is a tripwire against

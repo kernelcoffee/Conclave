@@ -20,11 +20,19 @@ Rules (names used in the deny reason and in CONCLAVE_ALLOW):
   stay-in-project      Write/Edit or a writing Bash command outside the project directory
                        (temp dirs, the scratchpad and ~/.claude are allowed)
   no-secret-in-output  a final message that contains a secret-looking value
+  commit-approval      git commit/push/tag and gh pr/release from the main session always
+                       ask the user first (a permission prompt); allow it with
+                       CONCLAVE_ALLOW=commit-approval when the user said so
+  pii                  personal or identifiable information (email addresses, phone
+                       numbers, home-directory paths, the local git identity, card,
+                       IBAN or national id numbers) in written files, staged changes,
+                       commit or PR text, or data sent out
 
 Overrides come from the environment Claude Code was started with, never from the command
 line (an inline CONCLAVE_* assignment is itself denied):
   CONCLAVE_ALLOW=rule,rule       skip these rules ("all" skips everything)
   CONCLAVE_ALLOWED_HOSTS=a.com,b.org   extra hosts data may be sent to
+  CONCLAVE_PII_ALLOW=you@your.org,Your Name      values the pii rule accepts (a public contact)
 
 A deny reason never contains the matched value. This is a tripwire against mistakes, not a
 security boundary: a command can always be written in a way the parser does not see.
@@ -166,6 +174,131 @@ PLACEHOLDER = re.compile(
 )
 
 MAX_SCAN_BYTES = 1_000_000
+
+# ---- personal and identifiable information ------------------------------------------
+PII_ALLOW = {v.strip().lower() for v in os.environ.get("CONCLAVE_PII_ALLOW", "").split(",") if v.strip()}
+# Files whose job is to name people; the pii rule does not apply to them.
+PII_EXEMPT_FILES = ["LICENSE*", "LICENCE*", "COPYING*", "AUTHORS*", "CONTRIBUTORS*", "MAINTAINERS*", "CODEOWNERS", ".mailmap", "NOTICE*"]
+EMAIL = re.compile(r"(?<![\w.+-])([A-Za-z0-9._%+-]{1,64})@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})(?![\w-])")
+SAFE_EMAIL_DOMAINS = re.compile(r"(?:^|\.)(?:example\.(?:com|org|net)|example|test|invalid|localhost|local|users\.noreply\.github\.com|noreply\.github\.com)$", re.I)
+SAFE_EMAIL_LOCAL = re.compile(r"^(?:no-?reply|donotreply|do-not-reply|noreply\+.*|git|nobody|root|postmaster|security|support|admin|info|hello|contact|webmaster|user|someone|test|foo|bar|me|you|name|email|first\.last)$", re.I)
+PHONE = re.compile(r"(?<![\w+])\+\d{1,3}[ .-]?\(?\d{1,4}\)?(?:[ .-]?\d{2,4}){2,4}(?!\w)")
+HOME_PATH = re.compile(r"(?:/home/|/Users/|[A-Za-z]:\\{1,2}Users\\{1,2})([A-Za-z0-9._-]+)")
+SAFE_HOME_USERS = {"user", "username", "me", "you", "name", "runner", "ubuntu", "vscode", "node", "app", "dev", "developer", "example", "your-name", "yourname", "<user>", "$user", "public", "default", "shared"}
+CARD = re.compile(r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)")
+IBAN = re.compile(r"\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,4})?\b")
+US_SSN = re.compile(r"(?<!\d)(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}(?!\d)")
+FR_NIR = re.compile(r"(?<!\d)[12] ?\d{2} ?(?:0[1-9]|1[0-2]) ?(?:\d{2}|2[AB]) ?\d{3} ?\d{3} ?\d{2}(?!\d)")
+
+
+def luhn_ok(digits):
+    total, alt = 0, False
+    for ch in reversed(digits):
+        d = int(ch)
+        if alt:
+            d = d * 2 - 9 if d > 4 else d * 2
+        total += d
+        alt = not alt
+    return total % 10 == 0
+
+
+def iban_ok(raw):
+    s = raw.replace(" ", "")
+    if not 15 <= len(s) <= 34:
+        return False
+    moved = s[4:] + s[:4]
+    num = "".join(str(int(c, 36)) for c in moved)
+    return int(num) % 97 == 1
+
+
+_LOCAL_IDENTITY = None
+
+
+def local_identity(cwd):
+    """The machine's own identity: git user.name/email, the login name, the home path."""
+    global _LOCAL_IDENTITY
+    if _LOCAL_IDENTITY is None:
+        ident = set()
+        for key in ("user.email", "user.name"):
+            rc, out = git(["config", "--get", key], cwd or os.getcwd())
+            v = out.strip()
+            if rc == 0 and v and (key == "user.email" or len(v.split()) >= 2):
+                ident.add(v)
+        login = os.environ.get("USER") or os.environ.get("LOGNAME") or HOME.name
+        if login and login.lower() not in SAFE_HOME_USERS and len(login) >= 3:
+            ident.add(str(HOME))
+        _LOCAL_IDENTITY = {v for v in ident if v.lower() not in PII_ALLOW}
+    return _LOCAL_IDENTITY
+
+
+def pii_exempt(path):
+    name = Path(str(path)).name if path else ""
+    return bool(name) and any(fnmatch.fnmatch(name.upper(), g.upper()) for g in PII_EXEMPT_FILES)
+
+
+def find_pii(text, cwd=None):
+    """Return [(kind, line)] for personal or identifiable values in text. Never the value."""
+    hits = []
+    if not text:
+        return hits
+
+    def add(kind, pos):
+        hits.append((kind, text.count("\n", 0, pos) + 1))
+
+    for m in EMAIL.finditer(text):
+        local, domain = m.group(1), m.group(2)
+        token_start = max(text.rfind(c, 0, m.start()) for c in " \t\n'\"`<>()[]") + 1
+        if "://" in text[token_start:m.start()]:
+            continue  # userinfo in a URL (scheme://user:pass@host), not an address
+        if m.group(0).lower() in PII_ALLOW or SAFE_EMAIL_DOMAINS.search(domain) or SAFE_EMAIL_LOCAL.match(local):
+            continue
+        if domain.lower() in ("anthropic.com",) and local.lower().startswith("noreply"):
+            continue
+        add("email address", m.start())
+    for m in PHONE.finditer(text):
+        digits = re.sub(r"\D", "", m.group(0))
+        if 9 <= len(digits) <= 15 and m.group(0).strip().lower() not in PII_ALLOW:
+            add("phone number", m.start())
+    for m in HOME_PATH.finditer(text):
+        user = m.group(1).lower()
+        if user in SAFE_HOME_USERS or user.startswith(("$", "<", "{", "%")) or f"/home/{user}" in PII_ALLOW:
+            continue
+        add("home-directory path naming a user", m.start())
+    for m in CARD.finditer(text):
+        digits = re.sub(r"\D", "", m.group(0))
+        if 13 <= len(digits) <= 19 and len(set(digits)) > 3 and luhn_ok(digits):
+            add("payment card number", m.start())
+    for m in IBAN.finditer(text):
+        try:
+            if iban_ok(m.group(0)):
+                add("IBAN", m.start())
+        except ValueError:
+            continue
+    for m in US_SSN.finditer(text):
+        add("national id number", m.start())
+    for m in FR_NIR.finditer(text):
+        if len(re.sub(r"\D", "", m.group(0))) >= 13:
+            add("national id number", m.start())
+    for value in local_identity(cwd):
+        idx = text.find(value)
+        if idx >= 0:
+            add("the local user's identity (git name or email, home path)", idx)
+    return hits
+
+
+def deny_pii(where, hits):
+    kinds = ", ".join(sorted({k for k, _ in hits}))
+    first = hits[0][1]
+    deny(
+        "pii",
+        f"{where} contains personal or identifiable information ({kinds}; first at line {first}). Use a placeholder "
+        "(user@example.com, /home/user, ~/...) or a relative path. If it is a public contact the user wants, they add "
+        "it to CONCLAVE_PII_ALLOW.",
+    )
+
+
+# Commit approval: collected during the checks, emitted as an "ask" only if no rule denied.
+PENDING_ASK = []
 TEMP_PREFIXES = ["/tmp", "/var/tmp", "/dev/shm"]
 
 
@@ -493,6 +626,10 @@ def check_outbound(op, toks):
             "",
         )
         sends = sends or method in ("POST", "PUT", "PATCH") or op == "|" or any(t.startswith("@") for t in toks[1:])
+        if sends:
+            phits = find_pii(" ".join(toks[1:]))
+            if phits:
+                deny_pii(f"the `{head}` request", phits)
         literal_credential = any(find_secrets(t) for t in toks[1:])
         if literal_credential:
             deny(
@@ -537,6 +674,13 @@ def check_git(data, toks):
             "subagent-no-git",
             f"`git {sub}` from a subagent ({data.get('agent_type') or 'unknown role'}). Only the main session commits, after the user approves.",
         )
+    if sub in ("commit", "push", "tag") and not in_sub:
+        PENDING_ASK.append(f"git {sub}")
+    if sub in ("commit", "tag"):
+        msg = " ".join(args)
+        hits = find_pii(msg, cwd)
+        if hits:
+            deny_pii(f"the `git {sub}` message", hits)
     if sub == "config" and any(f in ("--global", "--system") for f in flags):
         deny(
             "destructive-command",
@@ -640,16 +784,26 @@ def scan_staged(cwd, include_unstaged=False):
     added = "\n".join(l[1:] for l in diff.splitlines() if l.startswith("+") and not l.startswith("+++"))
     current = ""
     report = []
+    pii_report = []
     for l in diff.splitlines():
         if l.startswith("+++ "):
             current = l[4:].replace("b/", "", 1)
         elif l.startswith("+") and not l.startswith("+++"):
             for name, _ in find_secrets(l[1:]):
                 report.append(f"{current} ({name})")
+            if not pii_exempt(current):
+                for kind, _ in find_pii(l[1:], cwd):
+                    pii_report.append(f"{current} ({kind})")
     if report:
         deny(
             "commit-secret",
             f"the staged changes contain secret-looking values: {', '.join(sorted(set(report))[:5])}. Move them to an ignored file or an environment variable.",
+        )
+    if pii_report:
+        deny(
+            "pii",
+            f"the staged changes contain personal or identifiable information: {', '.join(sorted(set(pii_report))[:5])}. "
+            "Replace it with a placeholder or a relative path, or the user adds a public contact to CONCLAVE_PII_ALLOW.",
         )
 
 
@@ -679,6 +833,10 @@ def scan_add(cwd, args):
                         "commit-secret",
                         f"`{c}` contains a secret-looking value ({hits[0][0]}, line {hits[0][1]}); do not stage it.",
                     )
+                if not pii_exempt(c):
+                    phits = find_pii(text, cwd)
+                    if phits:
+                        deny_pii(f"`{c}`", phits)
         except OSError:
             continue
 
@@ -827,6 +985,26 @@ def check_secret_tokens(toks):
                 )
 
 
+GH_PUBLISHING = {("pr", "create"), ("pr", "merge"), ("pr", "comment"), ("pr", "review"), ("pr", "edit"),
+                 ("issue", "create"), ("issue", "comment"), ("issue", "edit"), ("release", "create"),
+                 ("release", "edit"), ("gist", "create"), ("repo", "create")}
+
+
+def check_gh(data, toks):
+    if not toks or Path(toks[0]).name != "gh" or len(toks) < 3:
+        return
+    pair = (toks[1], toks[2])
+    if pair not in GH_PUBLISHING and toks[1] != "api":
+        return
+    if data.get("agent_id"):
+        deny("subagent-no-git", f"`gh {' '.join(pair)}` from a subagent publishes on the user's behalf; only the main session does, after approval.")
+    hits = find_pii(" ".join(toks[3:]), data.get("cwd"))
+    if hits:
+        deny_pii(f"the `gh {' '.join(pair)}` text", hits)
+    if pair in GH_PUBLISHING:
+        PENDING_ASK.append(f"gh {' '.join(pair)}")
+
+
 def check_bash(data):
     cmd = data["tool_input"].get("command") or ""
     if not cmd.strip():
@@ -840,6 +1018,7 @@ def check_bash(data):
         check_secret_tokens(toks)
         check_outbound(op, toks)
         check_git(data, toks)
+        check_gh(data, toks)
         check_destructive(data, op, toks, cmd)
         check_scope_bash(data, toks, cmd)
 
@@ -877,6 +1056,10 @@ def check_write(data):
                 f"`{path}` is outside the project directory. Only the project, temp dirs and the scratchpad are writable.",
             )
     hits = find_secrets(content or "")
+    if not hits and not pii_exempt(path):
+        phits = find_pii(content or "", data.get("cwd"))
+        if phits:
+            deny_pii(f"the new text for `{Path(path).name}`", phits)
     if hits:
         name, line = hits[0]
         deny(
@@ -902,6 +1085,15 @@ def mode_pre(data):
         check_write(data)
     elif tool == "WebFetch":
         check_webfetch(data)
+    if PENDING_ASK and "commit-approval" not in ALLOW and "all" not in ALLOW:
+        actions = ", ".join(dict.fromkeys(PENDING_ASK))
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "ask",
+                "permissionDecisionReason": f"Conclave rule [commit-approval]: {actions} needs your explicit approval.",
+            }
+        }))
 
 
 def redact_any(obj):

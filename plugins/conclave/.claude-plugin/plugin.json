@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "A full software team of Claude Code agents: a lead sizes each task into a tier, then runs the roles and models that tier earns. Profile-driven, stack-agnostic.",
   "author": { "name": "Alexandre Moore" },
+  "homepage": "https://github.com/kernelcoffee/Conclave",
   "repository": "https://github.com/kernelcoffee/Conclave",
   "license": "MIT",
   "keywords": ["agents", "team", "orchestrator", "review", "qa", "workflow"]

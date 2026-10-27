@@ -14,28 +14,40 @@ demand, so adding a stack is one file.
 
 ## Install
 
-From a local checkout:
+Source: https://github.com/kernelcoffee/Conclave
 
-```bash
-claude plugin marketplace add ~/Work/personal/Conclave
-claude plugin install conclave@conclave
-```
-
-From git:
+From GitHub, inside Claude Code:
 
 ```
-/plugin marketplace add <owner>/Conclave
+/plugin marketplace add kernelcoffee/Conclave
 /plugin install conclave@conclave
 ```
 
-Development loop, from a project directory:
+Or from the command line:
 
 ```bash
-claude --plugin-dir ~/Work/personal/Conclave/plugins/conclave
+claude plugin marketplace add kernelcoffee/Conclave
+claude plugin install conclave@conclave
+```
+
+Update later with `claude plugin marketplace update conclave`.
+
+From a local clone, for development:
+
+```bash
+git clone https://github.com/kernelcoffee/Conclave.git
+claude plugin marketplace add ./Conclave
+claude plugin install conclave@conclave
+```
+
+Development loop, from the project you want to try it on:
+
+```bash
+claude --plugin-dir /path/to/Conclave/plugins/conclave
 ```
 
 then `/reload-plugins` after editing an agent, skill or workflow. Validate with
-`claude plugin validate plugins/conclave`.
+`claude plugin validate plugins/conclave` from the clone.
 
 ## Quick start
 

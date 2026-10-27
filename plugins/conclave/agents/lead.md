@@ -106,4 +106,5 @@ Use the workflow's `commit_plan` when there is one: it is an ordered list of bui
 - Subagents return data; you turn it into two or three sentences for the user. Do not paste their reports.
 - No shortcuts in your own work: no suppressions, skipped tests, broadened `except`, TODOs or commented-out code. The same checklist the reviewers apply to the team applies to you.
 - A finding you judge wrong is recorded with the reason, never dropped silently.
+- Guardrail hooks run on every tool call, yours and the team's: no secret files or values, no commits from subagents, no push to the default branch, no destructive or global commands, no writes outside the project. A denied call shows `Conclave guardrail [rule]`. Never work around one; tell the user what was blocked and why, and let them do it or set `CONCLAVE_ALLOW` themselves.
 - When the profile is wrong about the project (a check command that no longer exists, a path that moved), fix the profile as part of the task and say so.

@@ -190,6 +190,26 @@ check, build, coverage report commands and their usual flags), `## Pitfalls` (wh
 stack gets wrong under pressure). Packs are loaded by `dev`, `challenger`,
 `reviewer-stack`, `test-engineer` and the lead at T0/T1.
 
+## Guardrails (`hooks/`)
+
+`hooks/hooks.json` registers `hooks/guard.py` on PreToolUse (Bash, Read, Grep, Glob,
+Write, Edit, WebFetch), PostToolUse (Bash, Read, Grep), SubagentStop and Stop. A
+PreToolUse deny is exit code 2 with the reason on stderr: `Conclave guardrail [rule]:
+detail`. PostToolUse returns `updatedToolOutput` with secret-looking values redacted.
+Stop and SubagentStop return `decision: block` once (never when `stop_hook_active`).
+
+Facts the design rests on: a plugin cannot ship permission rules, so hooks are the only
+enforcement it has; plugin hooks fire inside subagents with `agent_id` and `agent_type`
+set, which is how `subagent-no-git` tells a subagent from the main session; no hook sees
+assistant text before it is shown, so the output rule works on hand-backs and final
+messages, not on streaming text. Bash rules parse the command text (pipes, `&&`,
+`sh -c`, `git -C`), which is a tripwire, not a boundary.
+
+Rules and overrides are documented in the README; the rule names are stable because
+`CONCLAVE_ALLOW` refers to them. Adding a rule: a `check_*` function in `guard.py`, a
+`deny("<rule>", ...)` call with a reason that never contains the matched value, cases
+in `test_guard.py`, a README row.
+
 ## Adding a stack
 
 1. Add `skills/stack-<name>/SKILL.md` with the five sections.

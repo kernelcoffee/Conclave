@@ -1,0 +1,52 @@
+{
+  "description": "Conclave guardrails: no secrets read, written, committed, sent or posted; subagents never commit; the default branch and history are protected; no destructive or global commands; writes stay inside the project. Overrides: CONCLAVE_ALLOW and CONCLAVE_ALLOWED_HOSTS in the environment Claude Code was started with.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Read|Grep|Glob|NotebookRead|Write|Edit|MultiEdit|NotebookEdit|WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.py\" pre",
+            "timeout": 20,
+            "statusMessage": "Conclave guardrail check"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Read|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.py\" post",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.py\" stop",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.py\" stop",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

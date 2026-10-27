@@ -27,6 +27,7 @@ plugins/conclave/
   bin/diff-coverage.sh
   bin/scope-check.sh                changed files must stay under allowed prefixes
   bin/freeze.sh                     sha256 freeze and verify of the contract tests
+  hooks/hooks.json, hooks/guard.py  guardrails the harness enforces (secrets, git, scope); test_guard.py
   templates/conclave.json           profile template
   schemas/conclave.schema.json      profile schema
 docs/design.md                      tiers, model policy, interfaces, conventions
@@ -40,6 +41,7 @@ $CLAUDE plugin validate plugins/conclave        # manifest and layout
 $CLAUDE plugin validate .                       # marketplace
 $CLAUDE --plugin-dir plugins/conclave           # try the plugin in a session; /reload-plugins after edits
 bash -n plugins/conclave/bin/*.sh && shellcheck plugins/conclave/bin/*.sh
+python3 -I plugins/conclave/hooks/test_guard.py      # guardrail rules, offline
 ```
 
 Workflow scripts use top-level `return`, which `node --check` rejects on its own. To
@@ -60,7 +62,9 @@ with `const meta`, in a scratch copy.
 - Adding a stack: a `skills/stack-<name>/SKILL.md` with the five sections, the enum entry
   in the schema, a README row. No agent or script changes.
 - Plugin agents ignore `permissionMode`, `hooks` and `mcpServers`. Write limits are prose.
-- Subagents never commit. The lead proposes a commit and waits.
+- Subagents never commit. The lead proposes a commit and waits. The guardrail hooks
+  enforce this and the secrets, history and scope rules; a deny reason never contains
+  the matched value, and rule names are stable (CONCLAVE_ALLOW refers to them).
 - Escalation is uniform: a workflow returns status `needs-human` with `decision_request`
   from any phase; the lead handles every one the same way.
 

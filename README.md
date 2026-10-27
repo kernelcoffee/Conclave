@@ -117,6 +117,32 @@ the profile's `models` block. No subagent ever commits.
 Workflows (`/conclave:dev-team`, `/conclave:review`, `/conclave:plan`) can also be
 launched directly with `args: { profile, exec }`; see `docs/design.md` for `exec`.
 
+## Guardrails
+
+The plugin ships hooks the harness runs on every tool call, in the main session and in
+every subagent. They block outright, with the rule name and the reason, and never
+echo a matched value. Overrides come only from the environment Claude Code was started
+with (`CONCLAVE_ALLOW=rule,rule`, `CONCLAVE_ALLOWED_HOSTS=host,host`); an inline
+`CONCLAVE_*=` assignment on a command is itself denied.
+
+| Rule | Blocks |
+|---|---|
+| `read-secret-file` | Read, Grep, Glob, Edit, Write and shell access to `.env*`, keys, certificates, credential files, `~/.ssh`, `~/.aws`, `~/.config/gh` and the like (`.env.sample` and friends stay allowed) |
+| `write-secret` | Write/Edit content or a shell command carrying a private key, cloud, GitHub, Slack, Stripe, OpenAI/Anthropic, JWT or connection-string credential, or a real-looking `password=`/`token=` literal |
+| `commit-secret` | `git add` or `git commit` with a secret file or secret content staged |
+| `send-data-out` | request bodies, uploads, pipes into `curl`/`wget`, `scp`/`rsync`/`nc` to hosts outside localhost, private ranges and `CONCLAVE_ALLOWED_HOSTS`; any request carrying a literal credential |
+| `subagent-no-git` | `git commit`, `push` or `tag` from a subagent |
+| `protect-history` | push to the default branch, force or delete pushes, `reset --hard`, amend or rebase of pushed commits, `branch -D`, reflog or gc pruning |
+| `destructive-command` | `rm -r` outside the project or on its root, `sudo`, `git clean -f`, wholesale `checkout --`/`restore .`, `stash drop`, `git config --global`, global package installs, writes to home config or system directories, piping downloads into a shell |
+| `stay-in-project` | Write/Edit or a writing shell command outside the project directory (temp dirs, the scratchpad and `~/.claude` are allowed) |
+| `no-secret-in-output` | a subagent hand-back or a final message that contains a secret-looking value; the author is sent back to rewrite it |
+
+Tool results from Bash, Read and Grep are scanned too: secret-looking values are
+replaced with `[REDACTED <kind>]` before the model sees them. This is a tripwire against
+mistakes, not a security boundary: a command can always be written in a way the parser
+does not recognise. Test the rules offline with
+`python3 -I plugins/conclave/hooks/test_guard.py`.
+
 ## The profile
 
 `.claude/conclave.json` describes the project: `components` (each with `paths`, `tests`,

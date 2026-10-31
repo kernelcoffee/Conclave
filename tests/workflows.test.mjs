@@ -112,6 +112,36 @@ const cases = [
   ['dev-team red QA gets one repair round', 'dev-team', { profile: profileWith({}), exec: T2, qaRed: true, cleanReview: true }, (r) => {
     eq(r.result.status, 'accepted'); includes(r.calls.map((c) => c.label), 'qa-fix:backend'); includes(r.calls.map((c) => c.label), 'qa rerun')
   }],
+  ['staged: plan then build then review then finish, state chained', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan' } }, async (r) => {
+    eq(r.result.status, 'stage-done'); eq(r.result.stage, 'plan'); eq(r.result.next_stage, 'build')
+    eq(r.types.join(','), 'pm,architect,ux'); eq(Object.keys(r.result.state.briefs).sort().join(','), 'backend,frontend')
+    const sc = { profile: profileWith({}), exec: { ...T3, stage: 'build', state: { ...r.result.state, briefs: { ...r.result.state.briefs, backend: 'edited by the user' } } } }
+    const b = await runScenario(wf('dev-team'), sc)
+    eq(b.result.status, 'stage-done'); eq(b.result.stage, 'build'); eq(b.result.next_stage, 'review')
+    notIncludes(b.types, 'pm'); includes(b.types, 'dev'); includes(b.types, 'challenger'); notIncludes(b.types, 'reviewer-correctness')
+    eq(b.result.state.briefs.backend.startsWith('edited by the user'), true)
+    eq(b.result.state.agents.n, r.result.state.agents.n + b.calls.length)
+    const v = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, stage: 'review', state: b.result.state } })
+    eq(v.result.status, 'stage-done'); eq(v.result.stage, 'review'); eq(v.result.next_stage, 'finish')
+    notIncludes(v.types, 'dev'.repeat(0) + 'challenger'); includes(v.types, 'reviewer-correctness'); includes(v.types, 'refuter'); eq(v.result.state.reviewClean, true)
+    const f = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, stage: 'finish', state: v.result.state } })
+    eq(f.result.status, 'accepted'); eq(f.result.next_stage, null); includes(f.types, 'test-engineer'); includes(f.types, 'qa'); includes(f.types, 'docs-writer')
+    eq(f.result.commit_plan.length > 0, true); eq(f.result.agents.n, v.result.state.agents.n + f.calls.length)
+  }],
+  ['staged: T2 build with a lead brief and no plan stage', 'dev-team', { profile: profileWith({}), exec: { ...T2, stage: 'build' } }, (r) => {
+    eq(r.result.status, 'stage-done'); eq(r.result.next_stage, 'review'); notIncludes(r.types, 'pm'); eq(r.result.state.briefs.backend, 'Goal')
+  }],
+  ['staged: build without a plan stops', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'build' } }, (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.calls.length, 0)
+  }],
+  ['staged: finish refuses an unclean review', 'dev-team', { profile: profileWith({}), exec: { ...T2, stage: 'finish', state: { components: ['backend'], plan: { summary: 'x', contracts: [], expected_failures: [], specialists: [] }, briefs: { backend: 'b' }, reports: { backend: { files_changed: [] } }, reviewClean: false, unresolved: [{ file: 'x' }] } } }, (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.calls.length, 0)
+  }],
+  ['staged: needs-human in plan carries state and resumes', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan' }, pmDecides: true }, async (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.result.stage, 'plan'); eq(r.result.state.plan, null)
+    const again = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, stage: 'plan', state: r.result.state, decisions: 'use a', proceed: true }, pmDecides: true })
+    eq(again.result.status, 'stage-done'); eq(again.result.state.agents.n, 4) // pm twice, architect, ux consultant
+  }],
   ['review clean', 'review', { profile: profileWith({}), exec: { base: 'origin/main', lenses: ['correctness', 'security', 'stack'], components: ['backend'], plugin_root: '/plug' }, cleanReview: true }, (r) => {
     eq(r.result.status, 'accepted'); notIncludes(r.types, 'refuter')
   }],
@@ -133,7 +163,7 @@ function notIncludes(list, x) { if (list.includes(x)) throw new Error(`expected 
 let failed = 0
 for (const [name, script, sc, check] of cases) {
   try {
-    check(await runScenario(wf(script), sc))
+    await check(await runScenario(wf(script), sc))
     console.log(`ok   ${name}`)
   } catch (e) {
     failed++

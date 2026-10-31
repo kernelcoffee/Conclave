@@ -3,6 +3,7 @@
   "name": "MyProject",
   "base": "origin/main",
   "summary": "One or two sentences: what the project is and who runs it.",
+  "pace": "step",
 
   "components": [
     {
@@ -59,7 +60,8 @@
   "docs": {
     "paths": ["docs/", "README.md"],
     "never": ["CLAUDE.md"],
-    "roadmap": "docs/functional.md"
+    "roadmap": "docs/functional.md",
+    "plans": "docs/plans/"
   },
 
   "devops": {

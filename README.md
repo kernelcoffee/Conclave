@@ -71,17 +71,29 @@ python3 -I plugins/conclave/hooks/test_guard.py   # guardrail rules
 node tests/workflows.test.mjs                     # workflow control flow, fake agents
 ```
 
-## Quick start
+## How a task runs
 
-1. In a project: `/conclave:init`. Review the generated `.claude/conclave.json`, fill the
-   `TODO` values (stakes, threat model, pitfalls), fix any command it could not verify.
+1. Once per project: `/conclave:init`. Review the generated `.claude/conclave.json`, fill
+   the `TODO` values (stakes, threat model, pitfalls), fix any command it could not verify.
 2. `/conclave <task>`. The lead prints a triage line such as
-   `Tier T2 · backend · ~9 agents · opus×7 sonnet×2 · build → challenge×1 → review → verify → tests → qa`
-   and then executes it. Add `--dry-run` to see the plan without spending anything,
-   `--tier N` to force a tier.
-3. When the run reports `ready_to_commit`, the lead proposes a commit message, split into
-   the build-safe slices the dev declared in its commit plan. Nothing is committed until
-   you approve.
+   `Tier T2 · backend · ~9 agents · opus×7 sonnet×2 · pace step · build → review → finish`
+   and writes a plan document to `docs/plans/<date>-<slug>.md`: the task, why, the spec,
+   the briefs per component, contracts, expected failures, a step checklist, the agent
+   budget. Nothing is built yet.
+3. One stage at a time. With the default pace, the lead pauses after each stage (plan,
+   build, review, finish) with a short summary of what changed and what was caught, and
+   the document updated. You say go, or edit the Briefs section first: the next stage
+   builds from what the document says. `--pace plan` pauses only after the plan,
+   `--pace auto` only on decisions. A T1 task gets a short plan and one pause before the
+   change; T0 has none.
+4. A session can end between stages. `/conclave:continue` (or `/conclave` with no task)
+   resumes at the next stage from the document and the run state in `.claude/conclave/`.
+5. When the finish stage reports `ready_to_commit`, the lead proposes commits in the
+   build-safe slices the dev declared, the plan document in the first one. Nothing is
+   committed until you approve, and the guardrails ask you for every commit.
+
+Add `--dry-run` to see the triage and the plan without spending anything, `--tier N` to
+force a tier.
 
 ## Tiers
 
@@ -141,7 +153,8 @@ the profile's `models` block. No subagent ever commits.
 
 | Command | Does |
 |---|---|
-| `/conclave <task> [--tier N] [--rounds N] [--dry-run]` | Triage and run the task |
+| `/conclave <task> [--tier N] [--rounds N] [--pace step\|plan\|auto] [--contract] [--duel] [--dry-run]` | Triage, write the plan document, run the task one stage at a time |
+| `/conclave:continue [slug]` | Resume a task at its next stage, from its plan document and run state |
 | `/conclave:init [--force]` | Generate `.claude/conclave.json` |
 | `/conclave:plan <task>` | pm and architect only; spec, decisions, briefs, no code |
 | `/conclave:review [base-ref] [--lenses a,b,c]` | Review and refute the working-tree diff; changes nothing |
@@ -182,10 +195,10 @@ does not recognise. Test the rules offline with
 
 ## The profile
 
-`.claude/conclave.json` describes the project: `components` (each with `paths`, `tests`,
+`.claude/conclave.json` describes the project: `pace` (how often a task pauses), `components` (each with `paths`, `tests`,
 `stacks`, `checks`, optional `build`, `e2e`, `coverage`, `setup`, `pitfalls`,
 `conventions`, `ui`), `contracts` between components, `stakes` (what severity `high`
-means here), `security.threat_model`, `docs`, `devops`, `gates`, `git`, `models` and
+means here), `security.threat_model`, `docs` (including `docs.plans`, where plan documents go), `devops`, `gates`, `git`, `models` and
 `tier_overrides`. Start from `plugins/conclave/templates/conclave.json`; the schema is
 `plugins/conclave/schemas/conclave.schema.json`. Findings are routed to the dev that owns
 the path, the docs writer, or devops by matching these entries. The same entries drive

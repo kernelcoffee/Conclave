@@ -86,7 +86,10 @@ See `plugins/conclave/schemas/conclave.schema.json`. Key fields the scripts rely
   dev_specialities: [],          // optional override of the architect's duel specialities
   decisions: "", proceed: false, // resume after a needs-human stop
   briefs_from_files: false,      // force agents to read their brief from the plugin agents dir
-  plugin_root: "/abs/path/plugins/conclave"
+  plugin_root: "/abs/path/plugins/conclave",
+  stage: "all",                  // "plan" | "build" | "review" | "finish" | "all"; one stage per launch
+  state: null,                   // the state object the previous stage returned, passed back verbatim
+  // pace ("step" | "plan" | "auto") is the lead's own setting; the script never reads it
 }
 ```
 
@@ -107,6 +110,42 @@ Every workflow returns a `status`:
   ordered build-safe slices (`title`, `files`, `rationale`) that the lead proposes as
   separate commits: frozen contract tests first, each dev's slices, test additions, docs.
 - `not-ready`: finished but a gate is red; `qa` says which.
+
+## Stages, pace and the plan document
+
+The dev-team script runs one stage per launch and returns everything the next stage
+needs, so the lead can pause between stages and the user can read, edit and resume.
+
+| Stage | Runs | Produces |
+|---|---|---|
+| `plan` | pm, architect, design duel, consult | `state.briefs` (final), spec, contracts, expected failures |
+| `build` | contract tests, build, cross-check, challenge | files changed, challenges, escalations |
+| `review` | lenses, refute, fix, probes | findings raw, confirmed, fixed, probe results |
+| `finish` | tests, docs, QA | `accepted` or `not-ready`, `commit_plan` |
+
+Return contract of every launch: `status` (`stage-done`, `needs-human`, `accepted`,
+`not-ready`), `stage`, `next_stage` (`build`, `review`, `finish` or `null`), `state`
+(opaque to the lead except `state.briefs`, passed back verbatim), `summary` (components,
+files_changed, challenges, escalations, findings_raw, findings_confirmed,
+findings_fixed, probes, tests_added, docs_files, qa_green, agents_used), `agents`, and
+for `needs-human` the `decision_request`; a stop is resumed by relaunching the same
+stage with `exec.decisions`, `exec.proceed: true` and the same `state`. `stage: "all"`
+runs every stage in one launch. At T2 the lead never launches `plan`: it writes the brief
+itself and launches `build` with `exec.brief` and no `state`.
+
+The plan document lives at `<docs.plans>/<YYYY-MM-DD>-<slug>.md` (default
+`docs/plans/`), created by the lead from `templates/plan.md` right after triage at T1 and
+above, kept current after every stage, and committed in the first commit slice. It is
+the user's steering surface: before `build` the lead re-reads its Briefs section into
+`state.briefs`, so an edited brief wins over the architect's. Stage state for resuming
+lives in `.claude/conclave/runs/<slug>.json` (ignored by git): `task`, `slug`,
+`plan_doc`, `tier`, `exec`, `stage_done`, `state`, timestamps. `/conclave:continue`
+reads both and launches the next stage, in this session or a later one.
+
+Pace is the lead's setting, from `--pace` on the command, else `profile.pace`, else
+`step`: `step` pauses after every stage, `plan` only after the plan, `auto` launches
+`stage: "all"` and pauses only on decisions. T1 always pauses once, after the brief is
+written and before any code; T0 has no plan document.
 
 ### What every subagent prompt contains
 

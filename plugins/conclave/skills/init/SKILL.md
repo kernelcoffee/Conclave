@@ -22,7 +22,8 @@ Read before you guess; name only paths and commands you verified exist.
 - **Tests.** Test directories and globs per component (`tests/`, `backend/tests/`, `src/**/*.test.ts`, `e2e/`).
 - **Coverage.** `pytest-cov`, `diff-cover`, vitest `coverage` reporters, `gcov`/`lcov`, `cargo-llvm-cov`. Fill `coverage.command` and `coverage.report` only when the tooling is installed or declared; otherwise omit `coverage` and leave `gates.coverage_changed_lines` out.
 - **Base ref.** `git symbolic-ref refs/remotes/origin/HEAD` gives `origin/<branch>`; fall back to `git branch --show-current` with the `origin/` prefix, else `origin/main`.
-- **Docs.** `docs/`, `README.md`, `CONTRIBUTING.md`, and any roadmap or todo file CLAUDE.md names. `CLAUDE.md` goes under `docs.never` unless CLAUDE.md itself asks to be kept current.
+- **Docs.** `docs/`, `README.md`, `CONTRIBUTING.md`, and any roadmap or todo file CLAUDE.md names. `CLAUDE.md` goes under `docs.never` unless CLAUDE.md itself asks to be kept current. Propose `docs.plans` as `docs/plans/` (where per-task plan documents are committed; reuse an existing plans or adr directory when the project has one).
+- **Pace.** Propose `"pace": "step"` (pause after every stage of a task); the user lowers it to `plan` or `auto` per project.
 - **DevOps.** `.github/workflows/*.yml`, `Dockerfile`, `docker-compose*.yml`, `scripts/`, and whether CLAUDE.md says `podman` or `docker`. Version files that must be bumped together (`pyproject.toml`, `package.json`, `Cargo.toml`, `CMakeLists.txt` project version) go in `devops.release`.
 - **Contracts.** Two components where one calls the other over HTTP, WebSocket, IPC or a shared schema get a `contracts` pair.
 - **Conventions and pitfalls.** Take project rules from CLAUDE.md's Conventions or Rules section into the matching component's `conventions`. Leave `pitfalls` with a TODO line unless CLAUDE.md states gotchas explicitly.

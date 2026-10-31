@@ -69,6 +69,9 @@ with `const meta`, in a scratch copy.
   the matched value, and rule names are stable (CONCLAVE_ALLOW refers to them).
 - Escalation is uniform: a workflow returns status `needs-human` with `decision_request`
   from any phase; the lead handles every one the same way.
+- Stages: the script runs one stage per launch (`exec.stage`) and returns `state` for the
+  next; the lead owns pacing and the plan document. Keep stages resumable: everything a
+  later stage needs must be in `state`.
 
 ## Git
 

@@ -16,10 +16,10 @@ Arguments: `$ARGUMENTS`.
 4. Say in one line what this spends: one opus agent per lens (`stack` counts once per distinct stack among the touched components) plus one refuter per finding. Then launch:
 
 ```
-Workflow({ name: "conclave:review", args: { profile: <profile object>, exec: { base: <ref>, lenses: <list>, components: <names>, refute_votes_high: 1, plugin_root: "${CLAUDE_PLUGIN_ROOT}" } } })
+Workflow({ name: "conclave:review-team", args: { profile: <profile object>, exec: { base: <ref>, lenses: <list>, components: <names>, refute_votes_high: 1, plugin_root: "${CLAUDE_PLUGIN_ROOT}" } } })
 ```
 
-If the name is not registered, launch with `scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/review.js"` and the same args.
+If the name is not registered, launch with `scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/review-team.js"` and the same args.
 
 5. Present the result:
    - Confirmed findings grouped `high`, `medium`, `low`; each as `file:line` then the summary, the failure scenario, and the suggested fix when there is one.

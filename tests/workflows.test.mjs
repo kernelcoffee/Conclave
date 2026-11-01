@@ -30,9 +30,10 @@ function fakeAgent(sc, calls) {
   return async (prompt, opts = {}) => {
     calls.push({ label: opts.label || '', type: (opts.agentType || 'plain').replace('conclave:', ''), model: opts.model || 'inherit' })
     const l = opts.label || ''
-    const comps = sc.exec.components || ['backend']
+    const comps = (sc.exec && sc.exec.components) || ['backend']
     if (!opts.schema) return 'guidance'
     if (l === 'profile') return { profile: template }
+    if (l === 'design-study') return { current_state: 'today', problems: ['p'], proposed_model: 'model M', alternatives: [{ name: 'A', summary: 's', pros: ['x'], cons: ['y'] }], decisions: sc.designDecides && !(sc.exec && sc.exec.proceed) ? [{ question: 'storage?', options: [{ label: 'sqlite', consequence: 'c1' }, { label: 'files', consequence: 'c2' }], recommendation: 'sqlite' }] : [], migration: 'none', risks: [] }
     if (l === 'pm') return { summary: 's', goals: ['g'], acceptance: ['a'], components: comps, security_sensitive: false, needs_decision: sc.pmDecides ? [{ question: 'q', options: ['a', 'b'], recommendation: 'a' }] : [], assumptions: [] }
     if (l === 'architect') return { summary: 'p', components: comps, briefs: comps.map((c) => ({ component: c, brief: `brief ${c}` })), contracts: comps.length > 1 ? [{ between: ['backend', 'frontend'], text: 'GET /x' }] : [], expected_failures: ['a | b | c'], specialists: [], dev_specialities: ['data', 'concurrency'], needs_decision: [], security_sensitive: false, touches_infra: false }
     if (l.startsWith('design:') && l !== 'design:judge') return { approach: 'a', steps: ['s'], files: ['f'], risks: [], expected_tests: [], unsure: [] }
@@ -70,7 +71,7 @@ async function runScenario(file, sc) {
   const calls = []
   const phases = []
   const parallel = async (thunks) => Promise.all(thunks.map(async (f) => { try { return await f() } catch (e) { return null } }))
-  const result = await load(file)({ profile: sc.profile, exec: sc.exec }, fakeAgent(sc, calls), parallel, async () => [], (t) => phases.push(t), () => {}, { total: null })
+  const result = await load(file)(sc.rawArgs !== undefined ? sc.rawArgs : { profile: sc.profile, exec: sc.exec }, fakeAgent(sc, calls), parallel, async () => [], (t) => phases.push(t), () => {}, { total: null })
   return { result, calls, phases: [...new Set(phases)], types: calls.map((c) => c.type) }
 }
 
@@ -142,16 +143,31 @@ const cases = [
     const again = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, stage: 'plan', state: r.result.state, decisions: 'use a', proceed: true }, pmDecides: true })
     eq(again.result.status, 'stage-done'); eq(again.result.state.agents.n, 4) // pm twice, architect, ux consultant
   }],
-  ['review clean', 'review', { profile: profileWith({}), exec: { base: 'origin/main', lenses: ['correctness', 'security', 'stack'], components: ['backend'], plugin_root: '/plug' }, cleanReview: true }, (r) => {
+  ['review clean', 'review-team', { profile: profileWith({}), exec: { base: 'origin/main', lenses: ['correctness', 'security', 'stack'], components: ['backend'], plugin_root: '/plug' }, cleanReview: true }, (r) => {
     eq(r.result.status, 'accepted'); notIncludes(r.types, 'refuter')
   }],
-  ['review with a confirmed finding', 'review', { profile: profileWith({}), exec: { base: 'origin/main', lenses: ['correctness'], components: ['backend'], plugin_root: '/plug' } }, (r) => {
+  ['review with a confirmed finding', 'review-team', { profile: profileWith({}), exec: { base: 'origin/main', lenses: ['correctness'], components: ['backend'], plugin_root: '/plug' } }, (r) => {
     eq(r.result.status, 'not-ready'); eq(r.result.confirmed.length, 1); includes(r.types, 'refuter')
   }],
-  ['plan accepted', 'plan', { profile: profileWith({}), exec: { task: 'x', components: ['backend'], plugin_root: '/plug' } }, (r) => {
+  ['string launch: plan-team', 'plan-team', { rawArgs: 'add a thing', exec: {} }, (r) => { eq(r.result.status, 'accepted'); eq(r.phases[0], 'Profile'); eq(r.types.join(','), 'plain,pm,architect') }],
+  ['string launch: review-team', 'review-team', { rawArgs: 'look at it', exec: {}, cleanReview: true }, (r) => { eq(r.result.status, 'accepted'); eq(r.phases[0], 'Profile') }],
+  ['string launch: dev-team', 'dev-team', { rawArgs: 'build a thing', exec: {} }, (r) => { eq(r.result.status, 'accepted'); eq(r.phases[0], 'Profile'); includes(r.types, 'pm'); includes(r.types, 'dev') }],
+  ['object launch unchanged: empty object throws on missing task', 'dev-team', { rawArgs: {}, exec: {} }, (r) => { throw new Error('should have thrown') }],
+  ['design mode: plan-team stops on design decisions then resumes', 'plan-team', { profile: profileWith({}), exec: { task: 'redesign x', components: ['backend'], mode: 'design', plugin_root: '/plug' }, designDecides: true }, async (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.result.decision_request.question, 'Design decisions'); eq(r.types.join(','), 'architect')
+    eq(r.result.decision_request.context.decisions[0].options[0].consequence, 'c1')
+    const again = await runScenario(wf('plan-team'), { profile: profileWith({}), exec: { task: 'redesign x', components: ['backend'], mode: 'design', plugin_root: '/plug', decisions: 'sqlite', proceed: true }, designDecides: true })
+    eq(again.result.status, 'accepted'); eq(again.types.join(','), 'architect,pm,architect'); eq(again.result.design_study.proposed_model, 'model M')
+  }],
+  ['design mode: dev-team plan stage stops, resumes from state without re-running the study', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan', mode: 'design' }, designDecides: true }, async (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.types.join(','), 'architect'); eq(r.result.state.design_study.proposed_model, 'model M')
+    const again = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, stage: 'plan', mode: 'design', state: r.result.state, decisions: 'sqlite', proceed: true }, designDecides: true })
+    eq(again.result.status, 'stage-done'); eq(again.types.join(','), 'pm,architect,ux'); eq(again.result.state.design_study.proposed_model, 'model M')
+  }],
+  ['plan accepted', 'plan-team', { profile: profileWith({}), exec: { task: 'x', components: ['backend'], plugin_root: '/plug' } }, (r) => {
     eq(r.result.status, 'accepted'); eq(r.types.join(','), 'pm,architect')
   }],
-  ['plan stops on decisions', 'plan', { profile: profileWith({}), exec: { task: 'x', components: ['backend'], plugin_root: '/plug' }, pmDecides: true }, (r) => {
+  ['plan stops on decisions', 'plan-team', { profile: profileWith({}), exec: { task: 'x', components: ['backend'], plugin_root: '/plug' }, pmDecides: true }, (r) => {
     eq(r.result.status, 'needs-human'); eq(r.types.join(','), 'pm')
   }],
 ]
@@ -163,7 +179,12 @@ function notIncludes(list, x) { if (list.includes(x)) throw new Error(`expected 
 let failed = 0
 for (const [name, script, sc, check] of cases) {
   try {
-    await check(await runScenario(wf(script), sc))
+    let r
+    try { r = await runScenario(wf(script), sc) } catch (e) {
+      if (name.includes('throws') && /task is required/.test(e.message)) { console.log(`ok   ${name}`); continue }
+      throw e
+    }
+    await check(r)
     console.log(`ok   ${name}`)
   } catch (e) {
     failed++

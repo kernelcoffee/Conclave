@@ -77,23 +77,30 @@ node tests/workflows.test.mjs                     # workflow control flow, fake 
    the `TODO` values (stakes, threat model, pitfalls), fix any command it could not verify.
 2. `/conclave <task>`. The lead prints a triage line such as
    `Tier T2 · backend · ~9 agents · opus×7 sonnet×2 · pace step · build → review → finish`
-   and writes a plan document to `docs/plans/<date>-<slug>.md`: the task, why, the spec,
-   the briefs per component, contracts, expected failures, a step checklist, the agent
-   budget. Nothing is built yet.
-3. One stage at a time. With the default pace, the lead pauses after each stage (plan,
-   build, review, finish) with a short summary of what changed and what was caught, and
-   the document updated. You say go, or edit the Briefs section first: the next stage
-   builds from what the document says. `--pace plan` pauses only after the plan,
-   `--pace auto` only on decisions. A T1 task gets a short plan and one pause before the
-   change; T0 has none.
-4. A session can end between stages. `/conclave:continue` (or `/conclave` with no task)
+   and writes a plan document to `docs/plans/<date>-<slug>.md`. The document leads with
+   the functional spec (why, goals, non-goals, acceptance criteria, the decisions only
+   you can make, each option with its consequence) and follows with the technical spec
+   (current state, proposed model, alternatives, migration, risks, briefs per component,
+   contracts, expected failures). Nothing is built yet.
+3. You approve the plan. Nothing is built until you approve the plan document, at any
+   pace; the functional spec is what you approve, and the technical spec serves it. Edit
+   the document instead of replying if you prefer; the lead re-reads it. A redesign or a
+   new feature with an open shape gets `--design`: a design study proposes the model and
+   argues the alternatives before the spec is written.
+4. One stage at a time. With the default pace, the lead pauses after each of build,
+   review and finish with a short summary of what changed and what was caught, and the
+   document updated. You say go, or edit the Briefs section first: the next stage builds
+   from what the document says. `--pace plan` and `--pace auto` run the three stages
+   through after the approval, pausing only on decisions. A T1 task gets a short plan and
+   the same approval before the change; T0 has none.
+5. A session can end between stages. `/conclave:continue` (or `/conclave` with no task)
    resumes at the next stage from the document and the run state in `.claude/conclave/`.
-5. When the finish stage reports `ready_to_commit`, the lead proposes commits in the
+6. When the finish stage reports `ready_to_commit`, the lead proposes commits in the
    build-safe slices the dev declared, the plan document in the first one. Nothing is
    committed until you approve, and the guardrails ask you for every commit.
 
 Add `--dry-run` to see the triage and the plan without spending anything, `--tier N` to
-force a tier.
+force a tier, `--design` to force the design study.
 
 ## Tiers
 
@@ -156,13 +163,14 @@ the profile's `models` block. No subagent ever commits.
 | `/conclave <task> [--tier N] [--rounds N] [--pace step\|plan\|auto] [--contract] [--duel] [--dry-run]` | Triage, write the plan document, run the task one stage at a time |
 | `/conclave:continue [slug]` | Resume a task at its next stage, from its plan document and run state |
 | `/conclave:init [--force]` | Generate `.claude/conclave.json` |
-| `/conclave:plan <task>` | pm and architect only; spec, decisions, briefs, no code |
+| `/conclave:plan [--design] <task>` | Write the plan document only: functional spec, then technical spec; `--design` runs a design study (current state, proposed model, alternatives, decisions) first; no code |
 | `/conclave:review [base-ref] [--lenses a,b,c]` | Review and refute the working-tree diff; changes nothing |
 | `/conclave:release <version>` | devops bumps versions, drafts the changelog, checks CI, proposes commit and tag |
 | `/conclave:audit [path]` | Whole-repo security sweep, one reviewer per component, refuters on high findings |
 
-Workflows (`/conclave:dev-team`, `/conclave:review`, `/conclave:plan`) can also be
-launched directly with `args: { profile, exec }`; see `docs/design.md` for `exec`.
+Workflows (`/conclave:dev-team`, `/conclave:review-team`, `/conclave:plan-team`) can also be
+launched directly, with `args: { profile, exec }` or with a plain task string; see
+`docs/design.md` for `exec`.
 
 ## Guardrails
 

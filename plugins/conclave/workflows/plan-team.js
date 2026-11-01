@@ -1,12 +1,12 @@
 // Conclave plan workflow: pm spec, then architect briefs, contracts and failure matrix.
 // Writes nothing; stops when the pm or the architect has decisions only the user can make.
 //
-//   Workflow({ name: "conclave:plan",
+//   Workflow({ name: "conclave:plan-team",
 //              args: { profile: <.claude/conclave.json as an object>,
 //                      exec: { task, components?, base?, plugin_root, decisions?, proceed? } } })
 
 export const meta = {
-  name: 'plan',
+  name: 'plan-team',
   description: 'Spec a task with the Conclave pm, then plan it with the architect; no code is written',
   whenToUse: 'Launched by /conclave:plan, or directly with args.profile and args.exec, before a large change.',
   phases: [
@@ -16,15 +16,29 @@ export const meta = {
 }
 
 // ---- args ------------------------------------------------------------------
-const opt = (typeof args === 'object' && args) || {}
+// A bare string (the raw workflow launcher passes the typed text) is the task; the
+// Profile phase then loads .claude/conclave.json. The object form is { profile, exec }.
+const opt = typeof args === 'string' ? { exec: { task: args } } : ((typeof args === 'object' && args) || {})
 const exec = opt.exec || {}
-if (!exec.task) throw new Error('args.exec.task is required')
+if (!exec.task) throw new Error('a task is required: pass a string, or { profile, exec: { task } }')
 const task = exec.task
 const pluginRoot = exec.plugin_root || ''
 const agentCount = { n: 0, byModel: {} }
 
 // ---- schemas ---------------------------------------------------------------
 const strList = { type: 'array', items: { type: 'string' } }
+const decisionOption = { anyOf: [{ type: 'string' }, { type: 'object', properties: { label: { type: 'string' }, consequence: { type: 'string' } }, required: ['label', 'consequence'] }] }
+const DECISION = { type: 'object', properties: { question: { type: 'string' }, options: { type: 'array', items: decisionOption }, recommendation: { type: 'string' } }, required: ['question', 'options', 'recommendation'] }
+const decisionList = { type: 'array', items: DECISION }
+const DESIGN_STUDY = {
+  type: 'object',
+  properties: {
+    current_state: { type: 'string' }, problems: strList, proposed_model: { type: 'string' },
+    alternatives: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, summary: { type: 'string' }, pros: strList, cons: strList }, required: ['name', 'summary', 'pros', 'cons'] } },
+    decisions: decisionList, migration: { type: 'string' }, risks: strList,
+  },
+  required: ['current_state', 'problems', 'proposed_model', 'alternatives', 'decisions', 'migration', 'risks'],
+}
 const PROFILE = { type: 'object', properties: { profile: { type: 'object' }, error: { type: 'string' } }, required: ['profile'] }
 const SPEC = {
   type: 'object',
@@ -34,7 +48,7 @@ const SPEC = {
     acceptance: strList,
     components: strList,
     security_sensitive: { type: 'boolean' },
-    needs_decision: { type: 'array', items: { type: 'object', properties: { question: { type: 'string' }, options: strList, recommendation: { type: 'string' } }, required: ['question', 'options', 'recommendation'] } },
+    needs_decision: decisionList,
     assumptions: strList,
   },
   required: ['summary', 'goals', 'acceptance', 'components', 'security_sensitive', 'needs_decision'],
@@ -52,7 +66,7 @@ const PLAN = {
     security_sensitive: { type: 'boolean' },
     touches_infra: { type: 'boolean' },
     dev_specialities: strList,
-    needs_decision: strList,
+    needs_decision: decisionList,
   },
   required: ['summary', 'components', 'briefs', 'contracts', 'expected_failures', 'specialists', 'needs_decision'],
 }
@@ -123,22 +137,40 @@ const context = (names) => {
     `Contract pairs the profile declares: ${show(profile.contracts || [])}`
 }
 
+// ---- Design study (exec.mode === 'design') -----------------------------------
+let designStudy = null
+const designStudyPrompt = () =>
+  `${context(components)}\n\n` +
+  (exec.decisions ? `The user answered your earlier design questions; honour them and leave decisions empty unless something new comes up:\n${exec.decisions}\n\n` : '') +
+  `DESIGN STUDY. Before anyone specifies or plans, establish the shape of the change: how it works today (with file references), the problems, the model you recommend, the alternatives you considered with their pros and cons, the decisions only the user can make (each option with its consequence, your recommendation first), how existing data and settings migrate, and the risks. Argue the recommendation from the goal of the task, not from implementation convenience. Do not edit files.`
+if (exec.mode === 'design') {
+  phase('Plan')
+  designStudy = await run('architect', designStudyPrompt(), { phase: 'Plan', schema: DESIGN_STUDY, label: 'design-study' })
+  if (!designStudy) throw new Error('architect returned no design study')
+  if (designStudy.decisions.length && !exec.proceed) {
+    log(`design study has ${designStudy.decisions.length} open decision(s); stopping before the pm`)
+    return { status: 'needs-human', phase: 'Plan', decision_request: { question: 'Design decisions', context: { decisions: designStudy.decisions, proposed_model: designStudy.proposed_model, alternatives: designStudy.alternatives } }, stopped_for_decisions: true, task, design_study: designStudy, spec: null, plan: null, agents: agentCount }
+  }
+}
+const modelText = () => (designStudy ? `Chosen model (from the design study; spec against it, do not reopen it):\n${designStudy.proposed_model}\n\nMigration:\n${designStudy.migration}\n\n` : '')
+
 // ---- Plan ------------------------------------------------------------------
 phase('Plan')
 const spec = await run('pm',
-  `${context(components)}\n\n` +
+  `${context(components)}\n\n${modelText()}` +
   (exec.decisions ? `The user answered your earlier questions; honour them and leave needs_decision empty unless something new comes up:\n${exec.decisions}\n\n` : '') +
   `Write the product spec for this task: goals, non-goals, acceptance criteria the test engineer can turn into cases, the components touched (choose from: ${allNames}), whether the change is security sensitive, and the decisions only the user can make. Do not edit files.`,
   { phase: 'Plan', schema: SPEC, label: 'pm' })
 if (!spec) throw new Error('pm returned nothing')
 if (spec.needs_decision.length && !exec.proceed) {
   log(`pm has ${spec.needs_decision.length} open decision(s); stopping before the architect`)
-  return { status: 'needs-human', phase: 'Plan', decision_request: { question: 'Decisions only the user can make', context: { needs_decision: spec.needs_decision } }, stopped_for_decisions: true, task, spec, plan: null, agents: agentCount }
+  return { status: 'needs-human', phase: 'Plan', decision_request: { question: 'Decisions only the user can make', context: { needs_decision: spec.needs_decision } }, stopped_for_decisions: true, task, design_study: designStudy, spec, plan: null, agents: agentCount }
 }
 if (spec.components && spec.components.length) components = spec.components.filter((c) => byName[c])
 
 const plan = await run('architect',
-  `${context(components)}\n\nProduct spec from the pm:\n${show(spec)}\n\n` +
+  `${context(components)}\n\n${modelText()}Product spec from the pm:\n${show(spec)}\n\n` +
+  (designStudy ? `Design study:\n${show(designStudy)}\n\n` : '') +
   (exec.decisions ? `User decisions:\n${exec.decisions}\n\n` : '') +
   `Components available: ${allNames}.\n` +
   `Plan the change: one brief per touched component (Goal, Files, Steps, Tests to write, Docs to update, Acceptance), a contract for every declared pair whose both sides change, the expected-failure matrix, ad-hoc specialists if the fixed team lacks the knowledge, risks and assumptions. Work on the current branch (uncommitted work is context, not something to undo). Do not edit files.`,
@@ -149,6 +181,6 @@ if (stopped) log(`architect has ${plan.needs_decision.length} open decision(s)`)
 
 log(`agents used: ${agentCount.n} (${Object.entries(agentCount.byModel).map(([m, n]) => `${m}×${n}`).join(', ')})`)
 if (stopped) {
-  return { status: 'needs-human', phase: 'Plan', decision_request: { question: 'Decisions only the user can make', context: { needs_decision: plan.needs_decision } }, stopped_for_decisions: true, task, components: plan.components, spec, plan, agents: agentCount }
+  return { status: 'needs-human', phase: 'Plan', decision_request: { question: 'Decisions only the user can make', context: { needs_decision: plan.needs_decision } }, stopped_for_decisions: true, task, components: plan.components, design_study: designStudy, spec, plan, agents: agentCount }
 }
-return { status: 'accepted', task, components: plan.components, spec, plan, stopped_for_decisions: false, agents: agentCount }
+return { status: 'accepted', task, components: plan.components, design_study: designStudy, spec, plan, stopped_for_decisions: false, agents: agentCount }

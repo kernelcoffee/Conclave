@@ -1,7 +1,7 @@
 // Conclave review workflow: lenses over the working-tree diff, then a refuter per finding.
 // No fixing; the result is a list of confirmed and refuted findings.
 //
-//   Workflow({ name: "conclave:review",
+//   Workflow({ name: "conclave:review-team",
 //              args: { profile: <.claude/conclave.json as an object>,
 //                      exec: { base, lenses, components, refute_votes_high, plugin_root, task? } } })
 //
@@ -9,7 +9,7 @@
 // among the components), ux (only when a touched component has ui: true).
 
 export const meta = {
-  name: 'review',
+  name: 'review-team',
   description: 'Review the working-tree diff with the Conclave lenses and refute every finding; changes nothing',
   whenToUse: 'Launched by /conclave:review, or directly with args.profile and args.exec, to check a diff before committing.',
   phases: [
@@ -20,7 +20,9 @@ export const meta = {
 }
 
 // ---- args ------------------------------------------------------------------
-const opt = (typeof args === 'object' && args) || {}
+// A bare string (the raw workflow launcher passes the typed text) is the task; the
+// Profile phase then loads .claude/conclave.json. The object form is { profile, exec }.
+const opt = typeof args === 'string' ? { exec: { task: args } } : ((typeof args === 'object' && args) || {})
 const exec = opt.exec || {}
 const lenses = exec.lenses || ['correctness', 'security', 'stack']
 const votesHigh = exec.refute_votes_high || 1

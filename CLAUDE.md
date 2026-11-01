@@ -22,7 +22,8 @@ plugins/conclave/
   skills/<command>/SKILL.md         /conclave, /conclave:init, :plan, :review, :release, :audit
   skills/stack-<name>/SKILL.md      stack knowledge packs (not user-invocable)
   workflows/dev-team.js             the pipeline; shaped by exec from the lead
-  workflows/review.js, plan.js      subsets
+  workflows/plan-team.js            plan only: design study (exec.mode design), pm, architect
+  workflows/review-team.js          review and refute only
   bin/shortcut-audit.sh             generic gate scripts QA and the verifier run
   bin/diff-coverage.sh
   bin/scope-check.sh                changed files must stay under allowed prefixes
@@ -69,6 +70,11 @@ with `const meta`, in a scratch copy.
   the matched value, and rule names are stable (CONCLAVE_ALLOW refers to them).
 - Escalation is uniform: a workflow returns status `needs-human` with `decision_request`
   from any phase; the lead handles every one the same way.
+- The functional spec in the plan document is the authority; agents trace technical
+  choices to it. Nothing is built before the user approves the document.
+- Workflow names never collide with skill names (`plan-team`, `review-team`, `dev-team`
+  versus the `plan`, `review`, `conclave` skills); every workflow also accepts a plain
+  task string as `args`.
 - Stages: the script runs one stage per launch (`exec.stage`) and returns `state` for the
   next; the lead owns pacing and the plan document. Keep stages resumable: everything a
   later stage needs must be in `state`.

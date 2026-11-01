@@ -47,9 +47,11 @@ export const meta = {
 }
 
 // ---- args ------------------------------------------------------------------
-const opt = (typeof args === 'object' && args) || {}
+// A bare string (the raw workflow launcher passes the typed text) is the task; the
+// Profile phase then loads .claude/conclave.json. The object form is { profile, exec }.
+const opt = typeof args === 'string' ? { exec: { task: args } } : ((typeof args === 'object' && args) || {})
 const exec = opt.exec || {}
-if (!exec.task) throw new Error('args.exec.task is required (the lead builds exec; see docs/design.md)')
+if (!exec.task) throw new Error('a task is required: pass a string, or { profile, exec: { task } } (the lead builds exec; see docs/design.md)')
 const task = exec.task
 const tier = exec.tier || 2
 const maxRounds = exec.rounds || (tier >= 3 ? 2 : 1)
@@ -81,6 +83,18 @@ const finding = {
 }
 const RUN = { type: 'object', properties: { command: { type: 'string' }, exit_code: { type: 'integer' }, output_tail: { type: 'string' } }, required: ['command', 'exit_code', 'output_tail'] }
 const runList = { type: 'array', items: RUN }
+const decisionOption = { anyOf: [{ type: 'string' }, { type: 'object', properties: { label: { type: 'string' }, consequence: { type: 'string' } }, required: ['label', 'consequence'] }] }
+const DECISION = { type: 'object', properties: { question: { type: 'string' }, options: { type: 'array', items: decisionOption }, recommendation: { type: 'string' } }, required: ['question', 'options', 'recommendation'] }
+const decisionList = { type: 'array', items: DECISION }
+const DESIGN_STUDY = {
+  type: 'object',
+  properties: {
+    current_state: { type: 'string' }, problems: strList, proposed_model: { type: 'string' },
+    alternatives: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, summary: { type: 'string' }, pros: strList, cons: strList }, required: ['name', 'summary', 'pros', 'cons'] } },
+    decisions: decisionList, migration: { type: 'string' }, risks: strList,
+  },
+  required: ['current_state', 'problems', 'proposed_model', 'alternatives', 'decisions', 'migration', 'risks'],
+}
 const PROFILE = { type: 'object', properties: { profile: { type: 'object' }, error: { type: 'string' } }, required: ['profile'] }
 const SPEC = {
   type: 'object',
@@ -90,7 +104,7 @@ const SPEC = {
     acceptance: strList,
     components: strList,
     security_sensitive: { type: 'boolean' },
-    needs_decision: { type: 'array', items: { type: 'object', properties: { question: { type: 'string' }, options: strList, recommendation: { type: 'string' } }, required: ['question', 'options', 'recommendation'] } },
+    needs_decision: decisionList,
     assumptions: strList,
   },
   required: ['summary', 'goals', 'acceptance', 'components', 'security_sensitive', 'needs_decision'],
@@ -108,7 +122,7 @@ const PLAN = {
     files: strList, risks: strList, assumptions: strList,
     security_sensitive: { type: 'boolean' },
     touches_infra: { type: 'boolean' },
-    needs_decision: strList,
+    needs_decision: decisionList,
   },
   required: ['summary', 'components', 'briefs', 'contracts', 'expected_failures', 'specialists', 'needs_decision'],
 }
@@ -256,6 +270,7 @@ let components = prev.components || exec.components || []
 let plan = prev.plan || null
 let spec = prev.spec || null
 let duelResult = prev.design || null
+let designStudy = prev.design_study || null
 const briefs = { ...(prev.briefs || {}) }
 const reports = { ...(prev.reports || {}) }
 const history = [...(prev.history || [])]
@@ -271,7 +286,7 @@ let docs = prev.docs || null
 let qa = prev.qa || null
 const agentsTotal = () => ({ n: agentsBefore + agentCount.n, byModel: agentCount.byModel, this_stage: agentCount.n })
 const snapshot = () => ({
-  profile, components, plan, spec, design: duelResult, briefs, reports, history, contract, escalated,
+  profile, components, plan, spec, design: duelResult, design_study: designStudy, briefs, reports, history, contract, escalated,
   reviewClean, unresolved: lastConfirmed, probes, docsTouched, devopsTouched, tests, docs, qa,
   agents: agentsTotal(),
 })
@@ -380,12 +395,27 @@ if (exec.brief && !plan) {
   plan = { summary: 'lead-written brief', components, briefs: components.map((c) => ({ component: c, brief: exec.brief })), contracts: [], expected_failures: exec.expected_failures || [], specialists: [], needs_decision: [], security_sensitive: Boolean(exec.security_sensitive), touches_infra: false, dev_specialities: exec.dev_specialities || [] }
   log(`T${tier}: planning skipped, the lead wrote the brief for ${components.join(', ')}`)
 }
+const designStudyPrompt = () =>
+  `${context(components)}\n\n` +
+  (exec.decisions ? `The user answered your earlier design questions; honour them and leave decisions empty unless something new comes up:\n${exec.decisions}\n\n` : '') +
+  `DESIGN STUDY. Before anyone specifies or plans, establish the shape of the change: how it works today (with file references), the problems, the model you recommend, the alternatives you considered with their pros and cons, the decisions only the user can make (each option with its consequence, your recommendation first), how existing data and settings migrate, and the risks. Argue the recommendation from the goal of the task, not from implementation convenience. Do not edit files.`
+const modelText = () => (designStudy ? `Chosen model (from the design study; spec against it, do not reopen it):\n${designStudy.proposed_model}\n\nMigration:\n${designStudy.migration}\n\n` : '')
 if (runs('plan')) {
+  if (!plan && exec.mode === 'design' && !designStudy) {
+    phase('Plan')
+    designStudy = await run('architect', designStudyPrompt(), { phase: 'Plan', schema: DESIGN_STUDY, label: 'design-study' })
+    if (!designStudy) return stop('Plan', 'The architect returned no design study.', {})
+    if (designStudy.decisions.length && !exec.proceed) {
+      log(`design study has ${designStudy.decisions.length} open decision(s); stopping before the pm`)
+      const s = stop('Plan', 'Design decisions', { decisions: designStudy.decisions, proposed_model: designStudy.proposed_model, alternatives: designStudy.alternatives })
+      return { ...s, stopped_for_decisions: true }
+    }
+  }
   if (!plan) {
     phase('Plan')
     if (!skip.has('pm')) {
       spec = await run('pm',
-        `${context(components)}\n\n` +
+        `${context(components)}\n\n${modelText()}` +
         (exec.decisions ? `The user answered your earlier questions; honour them and leave needs_decision empty unless something new comes up:\n${exec.decisions}\n\n` : '') +
         `Write the product spec for this task: goals, non-goals, acceptance criteria the test engineer can turn into cases, the components touched (choose from: ${(profile.components || []).map((c) => c.name).join(', ')}), whether the change is security sensitive, and the decisions only the user can make. Do not edit files.`,
         { phase: 'Plan', schema: SPEC, label: 'pm' })
@@ -400,6 +430,7 @@ if (runs('plan')) {
       plan = await run('architect',
         `${context(components)}\n\n` +
         (spec ? `Product spec from the pm:\n${show(spec)}\n\n` : '') +
+        (designStudy ? `Design study:\n${show(designStudy)}\n\n` : '') +
         (exec.decisions ? `User decisions:\n${exec.decisions}\n\n` : '') +
         `Contract pairs the profile declares: ${show(profile.contracts || [])}. Components available: ${(profile.components || []).map((c) => c.name).join(', ')}.\n` +
         `Plan the change: one brief per touched component, a contract for every declared pair whose both sides change, the expected-failure matrix, ad-hoc specialists if the fixed team lacks the knowledge, risks and assumptions.` +
@@ -787,6 +818,7 @@ return {
   spec,
   plan: { summary: plan.summary, contracts: plan.contracts, expected_failures: plan.expected_failures, specialists: plan.specialists, risks: plan.risks, assumptions: plan.assumptions },
   design: duelResult,
+  design_study: designStudy,
   contract: contract.tests.length ? { tests: contract.tests, files: contract.files } : null,
   review_clean: reviewClean,
   unresolved_findings: reviewClean ? [] : lastConfirmed,

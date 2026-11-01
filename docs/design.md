@@ -18,6 +18,12 @@ pieces; agent files, skills and workflow scripts all follow it.
    packs (`skills/stack-*`).
 4. **Nobody commits but the user.** Subagents never run `git commit`. The lead proposes a
    commit message and waits for approval.
+5. **Plan first, functional over technical.** Every task at T1 and above is written down
+   in a plan document whose functional spec (why, goals, non-goals, acceptance, decisions)
+   comes first and is what the user approves; the technical spec (current state, proposed
+   model, alternatives, briefs, contracts, failure matrix) serves it. Nothing is built
+   before the approval, at any pace. A brief, a design or a finding that traces to no goal
+   or acceptance criterion is out of scope.
 
 ## Tiers
 
@@ -89,12 +95,41 @@ See `plugins/conclave/schemas/conclave.schema.json`. Key fields the scripts rely
   plugin_root: "/abs/path/plugins/conclave",
   stage: "all",                  // "plan" | "build" | "review" | "finish" | "all"; one stage per launch
   state: null,                   // the state object the previous stage returned, passed back verbatim
+  mode: "",                      // "design": a design study runs before the pm in the plan stage
   // pace ("step" | "plan" | "auto") is the lead's own setting; the script never reads it
 }
 ```
 
-Workflow args: `{ profile, exec }`. When `profile` is missing the script spends one
-low-effort agent to read `.claude/conclave.json`.
+Workflow args: `{ profile, exec }`, or a plain string, which the script treats as
+`exec.task` with every other field at its default. When `profile` is missing the script
+spends one low-effort agent to read `.claude/conclave.json`. The workflows are named
+`conclave:dev-team`, `conclave:plan-team` and `conclave:review-team`, so that none
+collides with the `plan`, `review` and `conclave` skills that drive them.
+
+### Design mode and decisions
+
+`exec.mode: "design"` (plan stage of `dev-team`, and `plan-team`) runs the architect as a
+design study before the pm. It returns `current_state` (how it works today, with file
+references), `problems`, `proposed_model` (prose), `alternatives` (`name`, `summary`,
+`pros`, `cons`), `decisions`, `migration` and `risks`. When `decisions` is non-empty and
+`exec.proceed` is not set, the run stops with `status: "needs-human"` and
+`decision_request: { question: "Design decisions", context: { decisions, proposed_model,
+alternatives } }`; it resumes with `exec.decisions` and `exec.proceed: true` (and the
+saved `state` in `dev-team`). The pm then specs against the chosen model and the architect
+plans with the study as context. Returns carry `design_study`.
+
+Every decision item, from the design study, the pm or the architect, is
+`{ question, options: [{ label, consequence }], recommendation }`, recommendation first;
+a plain string option is accepted but carries no consequence. The lead presents each
+option with its consequence and writes `Chosen:` into the plan document.
+
+### The approval gate
+
+The build stage is never launched, at any pace, until the user has approved the plan
+document. The lead writes the Functional and Technical specs (itself at T1 and T2, from
+the plan stage at T3), shows the Functional spec, and waits. Status moves `planning` →
+`approved` on the user's word → `building` on launch. Pace governs only the pauses after
+build, review and finish.
 
 ### What a workflow returns
 
@@ -118,7 +153,7 @@ needs, so the lead can pause between stages and the user can read, edit and resu
 
 | Stage | Runs | Produces |
 |---|---|---|
-| `plan` | pm, architect, design duel, consult | `state.briefs` (final), spec, contracts, expected failures |
+| `plan` | design study (`exec.mode: "design"`), pm, architect, design duel, consult | `state.briefs` (final), spec, contracts, expected failures |
 | `build` | contract tests, build, cross-check, challenge | files changed, challenges, escalations |
 | `review` | lenses, refute, fix, probes | findings raw, confirmed, fixed, probe results |
 | `finish` | tests, docs, QA | `accepted` or `not-ready`, `commit_plan` |

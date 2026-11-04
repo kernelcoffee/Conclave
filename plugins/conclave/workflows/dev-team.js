@@ -92,6 +92,7 @@ const DESIGN_STUDY = {
     current_state: { type: 'string' }, problems: strList, proposed_model: { type: 'string' },
     alternatives: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, summary: { type: 'string' }, pros: strList, cons: strList }, required: ['name', 'summary', 'pros', 'cons'] } },
     decisions: decisionList, migration: { type: 'string' }, risks: strList,
+    diagrams: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, kind: { type: 'string' }, mermaid: { type: 'string' } }, required: ['title', 'mermaid'] } },
   },
   required: ['current_state', 'problems', 'proposed_model', 'alternatives', 'decisions', 'migration', 'risks'],
 }
@@ -120,6 +121,7 @@ const PLAN = {
     specialists: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, role: { type: 'string', enum: ['consultant', 'reviewer'] }, brief: { type: 'string' } }, required: ['name', 'role', 'brief'] } },
     dev_specialities: strList,
     files: strList, risks: strList, assumptions: strList,
+    diagrams: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, kind: { type: 'string' }, mermaid: { type: 'string' } }, required: ['title', 'mermaid'] } },
     security_sensitive: { type: 'boolean' },
     touches_infra: { type: 'boolean' },
     needs_decision: decisionList,
@@ -398,7 +400,7 @@ if (exec.brief && !plan) {
 const designStudyPrompt = () =>
   `${context(components)}\n\n` +
   (exec.decisions ? `The user answered your earlier design questions; honour them and leave decisions empty unless something new comes up:\n${exec.decisions}\n\n` : '') +
-  `DESIGN STUDY. Before anyone specifies or plans, establish the shape of the change: how it works today (with file references), the problems, the model you recommend, the alternatives you considered with their pros and cons, the decisions only the user can make (each option with its consequence, your recommendation first), how existing data and settings migrate, and the risks. Argue the recommendation from the goal of the task, not from implementation convenience. Do not edit files.`
+  `DESIGN STUDY. Before anyone specifies or plans, establish the shape of the change: how it works today (with file references), the problems, the model you recommend, the alternatives you considered with their pros and cons, the decisions only the user can make (each option with its consequence, your recommendation first), how existing data and settings migrate, the risks, and one or two Mermaid diagrams (flowchart or sequenceDiagram, real module and endpoint names, at most twelve nodes) that show the current and the proposed model when more than two parts or a flow are involved. Argue the recommendation from the goal of the task, not from implementation convenience. Do not edit files.`
 const modelText = () => (designStudy ? `Chosen model (from the design study; spec against it, do not reopen it):\n${designStudy.proposed_model}\n\nMigration:\n${designStudy.migration}\n\n` : '')
 if (runs('plan')) {
   if (!plan && exec.mode === 'design' && !designStudy) {

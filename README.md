@@ -99,6 +99,20 @@ node tests/workflows.test.mjs                     # workflow control flow, fake 
    build-safe slices the dev declared, the plan document in the first one. Nothing is
    committed until you approve, and the guardrails ask you for every commit.
 
+```mermaid
+flowchart LR
+    init["/conclave:init"] --> task["/conclave task"]
+    task --> plan["plan document<br/>docs/plans/"]
+    plan -->|"you approve"| build["build stage"]
+    build -->|"pause"| review["review stage"]
+    review -->|"pause"| finish["finish stage"]
+    finish --> commit["commits in slices<br/>you approve each"]
+    plan -. "edit the Briefs<br/>to steer" .-> build
+```
+
+Nothing to the right of the plan document runs before you approve it; every later arrow
+is a pause you release.
+
 Add `--dry-run` to see the triage and the plan without spending anything, `--tier N` to
 force a tier, `--design` to force the design study.
 
@@ -228,6 +242,9 @@ and frozen contract tests are enforced mechanically, not by prose.
 | `stack-lua` | Addon and script idioms, globals, event handlers, busted |
 | `stack-shell` | bash strict mode, quoting, portability, shellcheck, bats |
 | `stack-generic` | Fallback checklist for stacks without a pack |
+
+One more pack, `writing-docs`, is not a stack: it tells the docs writer and the lead how
+to structure a document and when a Mermaid diagram earns its place.
 
 Adding a stack:
 

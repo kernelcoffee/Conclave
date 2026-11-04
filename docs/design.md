@@ -255,6 +255,28 @@ ends with `/`, glob otherwise), else `docs-writer` for `docs.paths`, else `devop
   `checks`", "the stack packs named in your task", "`profile.stakes`".
 - Final message is data for the orchestrator, never a human-facing summary.
 
+## Documentation presentation (`skills/writing-docs/SKILL.md`)
+
+The docs-writer and the lead load one pack that says how each kind of document is
+structured, when a table or a code block beats prose, when a diagram earns its place, and
+the Mermaid patterns to use (flowchart, sequenceDiagram, stateDiagram-v2, erDiagram) with
+the syntax that bites. A design study may return `diagrams` (title, kind, mermaid); the
+lead places them in the plan document's Current state and Proposed model sections. In
+audit mode a stale diagram is a finding like a stale sentence. The stages, drawn the way
+the pack asks:
+
+```mermaid
+stateDiagram-v2
+    [*] --> planning: triage, plan document written
+    planning --> approved: user approves the functional spec
+    approved --> building: build stage
+    building --> reviewing: pause (pace step)
+    reviewing --> finishing: pause (pace step)
+    finishing --> ready: QA green, commit plan
+    ready --> done: commits land
+    planning --> stopped: user abandons
+```
+
 ## Stack packs (`skills/stack-<name>/SKILL.md`)
 
 One per stack listed in the schema enum. Sections: `## Idioms` (what good code looks

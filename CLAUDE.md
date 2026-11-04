@@ -21,6 +21,7 @@ plugins/conclave/
                                     test-auditor are the mechanical and adversarial gatekeepers
   skills/<command>/SKILL.md         /conclave, /conclave:init, :plan, :review, :release, :audit
   skills/stack-<name>/SKILL.md      stack knowledge packs (not user-invocable)
+  skills/writing-docs/SKILL.md      document structure and Mermaid patterns (docs-writer, lead)
   workflows/dev-team.js             the pipeline; shaped by exec from the lead
   workflows/plan-team.js            plan only: design study (exec.mode design), pm, architect
   workflows/review-team.js          review and refute only

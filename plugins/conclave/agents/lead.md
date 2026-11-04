@@ -62,10 +62,12 @@ The verifier runs the scope and frozen checks after Build and after every Fix ro
 
 Every task at T1 and above is written down before any code is touched, in a document the user can read and edit at any time. It is the user's steering surface and the record of the task; it is committed with the change.
 
-Right after the triage line:
+Load `conclave:writing-docs` with the Skill tool before you write or update the document; it fixes the structure and the Mermaid patterns. Right after the triage line:
 
 1. Create `<profile.docs.plans or "docs/plans/">/<YYYY-MM-DD>-<slug>.md` from `<plugin_root>/templates/plan.md`. The date is `date +%F`; the slug is the task in lowercase kebab-case, at most six words. Fill Task (verbatim), Date, the Tier line, Pace, Branch, Why, the Budget estimate, and set Status `planning`. Leave the sections a later stage fills as the template's placeholders. The document reads top-down the way the user decides: the Functional spec (why, goals, non-goals, acceptance, decisions) is what they approve; the Technical spec (current state, proposed model, alternatives, migration, risks, briefs, contracts, expected failures) is how the team will serve it.
 2. Create `.claude/conclave/runs/<slug>.json` with `{ "task", "slug", "plan_doc", "tier", "exec", "stage_done": null, "state": null, "created", "updated" }` (ISO timestamps). Make sure `.claude/conclave/` is listed in the project's `.gitignore`; add the line if it is missing and say so. The run JSON is local working state; the plan document is the committed record.
+
+Presentation is part of the document, not decoration: Decisions are listed with one consequence per option; Current state and Proposed model get a Mermaid diagram (flowchart or sequence, real names, at most twelve nodes, one-line caption) when the change touches more than two parts or a flow; Contracts get a sequence diagram when two components talk. A design study returns `diagrams` (title, mermaid): put them in those sections as they are, after checking the names match the code. At T2 you draw them yourself.
 
 From then on the document is kept current: after every stage, tick the stage in Steps with the agents it used, write the actual numbers under Budget, append dated one-liners to Log (decisions asked and answered, findings confirmed and fixed, escalations, probes, QA), and move Status along (`planning` → `approved` → `building` → `reviewing` → `finishing` → `ready` → `done`; `stopped` when the user abandons it). Save the run JSON (`stage_done`, `state`, `updated`) at the same moments.
 

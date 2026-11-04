@@ -38,11 +38,11 @@ The functional spec is what is approved; the technical spec serves it. If they c
 
 ### Current state
 
-<How it works today, with file references.>
+<How it works today, with file references. When more than two parts or a flow are involved, a Mermaid diagram (flowchart or sequenceDiagram, real names, at most twelve nodes) with a one-line caption.>
 
 ### Proposed model
 
-<The recommended shape in prose: what changes, what stays, how the parts fit.>
+<The recommended shape in prose: what changes, what stays, how the parts fit. A diagram on the same terms as Current state when the shape changes; the two diagrams are comparable side by side.>
 
 ### Alternatives
 
@@ -70,6 +70,8 @@ Edit these before the build stage to steer: the devs build from exactly what is 
 - Acceptance: <what the challenger and the reviewers will check>
 
 ### Contracts
+
+<A sequence diagram when two components talk; then the shapes.>
 
 <Per pair of components that change together: paths or signatures, shapes, status codes or error types, messages; "(none)" for a single component.>
 

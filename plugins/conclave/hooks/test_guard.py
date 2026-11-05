@@ -101,6 +101,94 @@ def main():
         expect("bash sh -c cat .env", "pre", sh("bash -c 'cat .env'", proj), 2, env)
         expect("bash cat gh hosts", "pre", sh(f"cat {HOME}/.config/gh/hosts.yml", proj), 2, env)
         expect("bash ls", "pre", sh("ls -la src", proj), 0, env)
+        # heredoc bodies fed to a text sink are prose, not filenames
+        cred = "cred" + "entials"
+        expect("heredoc prose naming credentials", "pre", sh(f"cat <<'EOF' > notes.md\nUse the database {cred} from the environment.\nEOF", proj), 0, env)
+        expect("heredoc <<- prose", "pre", sh("cat <<-EOF > notes.md\n\tKeep the token and kubeconfig out of git.\n\tEOF", proj), 0, env)
+        expect("heredoc in commit message", "pre", sh(f"git commit -m \"$(cat <<'EOF'\nfix: rotate {cred} handling\nEOF\n)\"", proj), 0, env)
+        expect("tee heredoc prose", "pre", sh(f"tee notes.md <<EOF\nthe {cred} file\nEOF", proj), 0, env)
+        expect("bash cat credentials", "pre", sh(f"cat {cred}", proj), 2, env)
+        expect("bash cat aws credentials", "pre", sh(f"cat ~/.aws/{cred}", proj), 2, env)
+        expect("heredoc redirected to credentials", "pre", sh(f"cat <<EOF > {cred}\nx\nEOF", proj), 2, env)
+        expect("heredoc after redirect to credentials", "pre", sh(f"cat > {cred} <<EOF\nx\nEOF", proj), 2, env)
+        expect("command after heredoc reads credentials", "pre", sh(f"cat <<EOF > notes.md\nx\nEOF\ncat {cred}", proj), 2, env)
+        expect("heredoc run by a shell", "pre", sh(f"bash <<'EOF'\ncat {cred}\nEOF", proj), 2, env)
+        expect("heredoc run by python", "pre", sh(f"python3 - <<'EOF'\nprint(open('{cred}').read())\nEOF", proj), 2, env)
+        expect("unterminated heredoc", "pre", sh(f"cat <<EOF > notes.md\nthe {cred}", proj), 2, env)
+        expect("here-string is not a heredoc", "pre", sh(f"cat <<< x\n{cred}\nx", proj), 2, env)
+        expect("heredoc body with secret", "pre", sh(f"cat <<'EOF' > notes.md\nkey {GHP}\nEOF", proj), 2, env)
+        # the whole pipeline decides: a body is text only when every stage shows, writes or files it
+        expect("heredoc piped to tee prose", "pre", sh(f"cat <<'EOF' | tee notes.md\nthe {cred} file\nEOF", proj), 0, env)
+        expect("heredoc gh pr body prose", "pre", sh(f"gh pr create --title t --body \"$(cat <<'EOF'\nrotate the {cred} handling\nEOF\n)\"", proj), 0, env)
+        # a `"$(cat <<EOF ...)"` body is one argument: checked as a word, and runs unless git or gh files it
+        expect("heredoc argument names a secret file", "pre", sh(f"cat \"$(cat <<'EOF'\n{cred}\nEOF\n)\"", proj), 2, env)
+        expect("heredoc commit -F value names a secret file", "pre", sh(f"git commit -F \"$(cat <<'EOF'\n~/.aws/{cred}\nEOF\n)\"", proj), 2, env)
+        breakout = f'"; cat ~/.aws/{cred}; "'
+        expect("heredoc in git -c value", "pre", sh(f"git -c core.editor=\"$(cat <<'EOF'\n{breakout}\nEOF\n)\" commit", proj), 2, env)
+        expect("heredoc in env assignment", "pre", sh(f"GIT_EDITOR=\"$(cat <<'EOF'\n{breakout}\nEOF\n)\" git commit", proj), 2, env)
+        expect("heredoc in python -c", "pre", sh(f"python3 -c \"$(cat <<'EOF'\n{breakout}\nEOF\n)\"", proj), 2, env)
+        # where bash and a naive scan disagree on what is a body, nothing is removed
+        expect("case pattern paren", "pre", sh(f"x=\"$(case y in y) echo '\" ; cat <<X > n '; esac)\"\\'\ncat ~/.aws/{cred}\nX", proj), 2, env)
+        expect("arithmetic shift", "pre", sh(f"echo $((1<<y))\necho \"\ny\ncat <<EOF > notes.md\n\"; cat ~/.aws/{cred}\nEOF", proj), 2, env)
+        expect("ansi-c quote", "pre", sh(f"cat $'\\' <<X '\\'\ncat ~/.aws/{cred}\nX", proj), 2, env)
+        expect("comsub ends body at word prefix", "pre", sh(f"git commit -m \"$(cat <<'EOF'\nmsg\nEOF)\"\ncat ~/.aws/{cred}\necho done\nEOF\n)\"", proj), 2, env)
+        expect("comsub closed before its body", "pre", sh(f"git commit -m \"$(cat <<'EOF')\"\ncat ~/.aws/{cred}\necho done\nEOF", proj), 2, env)
+        expect("multi-line arithmetic shift", "pre", sh(f"echo $((1<<y\n+0))\necho \"\ny\n)) ; cat <<EOF > n\n\"; cat ~/.aws/{cred}\nEOF", proj), 2, env)
+        expect("commented << after cat", "pre", sh(f"cat notes.md # <<X\ncat ~/.aws/{cred}\nX", proj), 2, env)
+        expect("quoted << after cat", "pre", sh(f"cat notes.md \" <<X \"\ncat ~/.aws/{cred}\nX", proj), 2, env)
+        expect("backslash joins terminator", "pre", sh(f"cat <<EOF > notes.md\nx\\\nEOF\ncat <<Y > n.md\nEOF\ncat ~/.aws/{cred}\nY", proj), 2, env)
+        expect("parameter expansion holds <<", "pre", sh(f"cat ${{x#<<EOF\n}} </dev/null; head ~/.aws/{cred}\nEOF\n", proj), 2, env)
+        # an unquoted body (`<<EOF`) runs its substitutions; a quoted one (`<<'EOF'`) is literal
+        expect("unquoted body substitution", "pre", sh(f"cat <<EOF > notes.md\n$(cat ~/.aws/{cred})\nEOF", proj), 2, env)
+        expect("unquoted body backticks", "pre", sh(f"cat <<EOF\n`cat ~/.aws/{cred}`\nEOF", proj), 2, env)
+        expect("unquoted body nested in an expansion", "pre", sh(f"cat <<EOF > notes.md\n${{x:-$(cat ~/.aws/{cred})}}\nEOF", proj), 2, env)
+        expect("unquoted body read redirect", "pre", sh("cat <<EOF | tee notes.txt\n$(<.env)\nEOF", proj), 2, env)
+        expect("unquoted body into commit -F -", "pre", sh("git commit -F - <<EOF\n$(cat ~/.ssh/id_rsa)\nEOF", proj), 2, env)
+        expect("unquoted body in a commit message", "pre", sh(f"git commit -m \"$(cat <<EOF\nfix: $(cat ~/.aws/{cred})\nEOF\n)\"", proj), 2, env)
+        expect("quoted body substitution is text", "pre", sh(f"cat <<'EOF' > notes.md\nRun $(cat ~/.aws/{cred}) to see it.\nEOF", proj), 0, env)
+        # git and gh read a top-level body as a message only through `-F -`, with nothing that runs first
+        expect("commit -F - heredoc prose", "pre", sh(f"git commit -F - <<'EOF'\nfix: rotate {cred} handling\nEOF", proj), 0, env)
+        expect("gh --body-file - heredoc prose", "pre", sh(f"gh pr create --title t --body-file - <<'EOF'\nrotate the {cred} handling\nEOF", proj), 0, env)
+        expect("commit heredoc without -F -", "pre", sh(f"git commit <<'EOF'\ncat ~/.aws/{cred}\nEOF", proj), 2, env)
+        expect("commit heredoc with -c editor", "pre", sh(f"git -c core.editor='bash -s' commit -F - <<'EOF'\ncat ~/.aws/{cred}\nEOF", proj), 2, env)
+        expect("commit heredoc with GIT_EDITOR", "pre", sh(f"GIT_EDITOR='bash -s' git commit -F - <<'EOF'\ncat ~/.aws/{cred}\nEOF", proj), 2, env)
+        expect("commit heredoc with --edit", "pre", sh(f"git commit -e -F - <<'EOF'\ncat ~/.aws/{cred}\nEOF", proj), 2, env)
+        # a message option's value is prose; any other argument from a heredoc is a filename
+        expect("commit message ending in a key path", "pre", sh("git commit -m \"$(cat <<'EOF'\nfix(tls): load cert from certs/server.key\nEOF\n)\"", proj), 0, env)
+        expect("commit message ending in config/credentials", "pre", sh(f"git commit -am \"$(cat <<'EOF'\ndocs: document config/{cred}\nEOF\n)\"", proj), 0, env)
+        expect("commit --message= ending in a key path", "pre", sh("git commit --message=\"$(cat <<'EOF'\nload certs/server.key\nEOF\n)\"", proj), 0, env)
+        expect("gh body ending in config/credentials", "pre", sh(f"gh pr create --title t --body \"$(cat <<'EOF'\nStops reading config/{cred}\nEOF\n)\"", proj), 0, env)
+        expect("commit --template value names a secret file", "pre", sh(f"git commit --template \"$(cat <<'EOF'\n~/.aws/{cred}\nEOF\n)\"", proj), 2, env)
+        # qa: every delimiter form bash leaves unexpanded is text; an expanding body stays checked
+        expect("qa: heredoc double-quoted delimiter prose", "pre", sh(f"cat <<\"EOF\" > notes.md\nthe {cred} file\nEOF", proj), 0, env)
+        expect("qa: heredoc backslash delimiter prose", "pre", sh(f"cat <<\\EOF > notes.md\nthe {cred} file\nEOF", proj), 0, env)
+        expect("qa: heredoc spaced quoted delimiter prose", "pre", sh(f"cat << 'EOF' > notes.md\nthe {cred} file\nEOF", proj), 0, env)
+        expect("qa: unquoted body with a variable stays checked", "pre", sh(f"cat <<EOF > notes.md\n$USER keeps the {cred} file\nEOF", proj), 2, env)
+        expect("qa: <<- body with a substitution", "pre", sh(f"cat <<-EOF > notes.md\n\t$(cat ~/.aws/{cred})\n\tEOF", proj), 2, env)
+        expect("qa: <<- terminator ends the body before the next command", "pre", sh(f"cat <<-'EOF' > notes.md\n\tthe {cred} file\n\tEOF\ncat ~/.aws/{cred}", proj), 2, env)
+        # qa: two heredocs, on one command or on two
+        expect("qa: two heredocs on one command, both prose", "pre", sh(f"cat <<'A' <<'B' > notes.md\nthe {cred} file\nA\nmore {cred}\nB", proj), 0, env)
+        expect("qa: two heredocs on one command, second expands", "pre", sh(f"cat <<'A' <<B > notes.md\nthe {cred} file\nA\n$(cat ~/.aws/{cred})\nB", proj), 2, env)
+        expect("qa: two heredoc commands, both prose", "pre", sh(f"cat <<'A' > notes.md\nthe {cred} file\nA\ntee more.md <<'B'\nalso {cred}\nB", proj), 0, env)
+        expect("qa: two heredoc commands, second runs in a shell", "pre", sh(f"cat <<'A' > notes.md\nthe {cred} file\nA\nbash <<'B'\ncat ~/.aws/{cred}\nB", proj), 2, env)
+        # qa: a body is text only when nothing downstream runs or opens it
+        expect("qa: heredoc piped to xargs", "pre", sh(f"cat <<'EOF' | xargs cat\n{cred}\nEOF", proj), 2, env)
+        expect("qa: heredoc teed into a process substitution", "pre", sh(f"cat <<'EOF' | tee >(bash) > notes.md\ncat ~/.aws/{cred}\nEOF", proj), 2, env)
+        expect("qa: heredoc teed then piped to sh", "pre", sh(f"cat <<'EOF' | tee notes.md | sh\ncat ~/.aws/{cred}\nEOF", proj), 2, env)
+        expect("qa: secret read chained on the heredoc line", "pre", sh(f"cat <<'EOF' > notes.md && cat ~/.aws/{cred}\nprose\nEOF", proj), 2, env)
+        # qa: redirect and tee targets of a text body are still paths
+        expect("qa: heredoc appended to aws credentials", "pre", sh(f"cat <<'EOF' >> ~/.aws/{cred}\nx\nEOF", proj), 2, env)
+        expect("qa: heredoc redirect without a space", "pre", sh(f"cat <<'EOF' >{cred}\nx\nEOF", proj), 2, env)
+        expect("qa: heredoc teed into .env", "pre", sh("cat <<'EOF' | tee -a .env\nX=1\nEOF", proj), 2, env)
+        # qa: a heredoc inside $( ) for a message, unquoted but with nothing to expand, is text
+        expect("qa: unquoted heredoc commit message without expansions", "pre", sh(f"git commit -m \"$(cat <<EOF\nfix: the {cred} loader\nEOF\n)\"", proj), 0, env)
+        # qa: text bodies still reach the secret and pii scans
+        qmail = "jane.doe" + "@" + "gmail.com"
+        qphone = "+" + "33 6 12 34 56 78"
+        expect("qa: unquoted heredoc body with a secret", "pre", sh(f"cat <<EOF > notes.md\nkey {AWS}\nEOF", proj), 2, env)
+        expect("qa: heredoc body phone written", "pre", sh(f"cat <<'EOF' > notes.md\ncall {qphone}\nEOF", proj), 2, env)
+        expect("qa: heredoc body email appended", "pre", sh(f"cat <<'EOF' >> notes.md\nping {qmail}\nEOF", proj), 2, env)
+        expect("qa: heredoc body email in a double-quoted body", "pre", sh(f"cat <<\"EOF\" > notes.md\nping {qmail}\nEOF", proj), 2, env)
 
         # ---- write-secret and stay-in-project
         expect(
@@ -452,6 +540,178 @@ def main():
         g("config", "user.name", "Jane Q Tester")
         expect("write local git name", "pre", pre("Write", {"file_path": str(proj / "t.md"), "content": "Maintained by Jane Q Tester\n"}, proj), 2, env)
 
+        # pii: author and maintainer fields of package manifests are public contacts
+        def manifest(**fields):
+            return json.dumps({"name": "x", "version": "1.0.0", **fields}, indent=2) + "\n"
+
+        def write(name, content):
+            return pre("Write", {"file_path": str(proj / name), "content": content}, proj)
+
+        author = {"name": "Jane Q Tester", "email": realmail}
+        phone = "+" + "33 6 12 34 56 78"
+        expect("write plugin.json author", "pre", write("plugin.json", manifest(author=author)), 0, env)
+        expect("write plugin.json author string", "pre", write("plugin.json", manifest(author=f"Jane Q Tester <{realmail}>")), 0, env)
+        expect("write plugin.json home path elsewhere", "pre", write("plugin.json", manifest(author=author, description="see /home/" + "janedoe/x")), 2, env)
+        expect("write plugin.json email elsewhere", "pre", write("plugin.json", manifest(author=author, homepage=f"mailto:{realmail}")), 2, env)
+        expect("write plugin.json git name elsewhere", "pre", write("plugin.json", manifest(author=author, description="by Jane Q Tester")), 2, env)
+        expect("write plugin.json phone in author", "pre", write("plugin.json", manifest(author={"name": "Jane", "url": phone})), 2, env)
+        expect("write plugin.json home path in author", "pre", write("plugin.json", manifest(author={"name": "Jane", "url": "file:///home/" + "janedoe/x"})), 2, env)
+        expect("write plugin.json author key nested in a value", "pre", write("plugin.json", manifest(description="author", keywords=[realmail])), 2, env)
+        expect("write broken plugin.json", "pre", write("plugin.json", manifest(author=author)[:-3]), 2, env)
+        expect("write same text to another file", "pre", write("src/c.json", manifest(author=author)), 2, env)
+        expect("write package.json author", "pre", write("package.json", manifest(author={"name": "Jane", "email": realmail})), 0, env)
+        expect("write package.json contributors", "pre", write("package.json", manifest(contributors=[{"name": "Jane", "email": realmail}], maintainers=[realmail])), 0, env)
+        expect(
+            "write marketplace.json owner and plugin author",
+            "pre",
+            write("marketplace.json", json.dumps({"name": "m", "owner": author, "plugins": [{"name": "p", "author": author}]}, indent=2)),
+            0,
+            env,
+        )
+        pyproject = f'[project]\nname = "x"\nauthors = [\n  {{ name = "Jane Q Tester", email = "{realmail}" }},\n]\nmaintainers = [{{ email = "{realmail}" }}]\n'
+        expect("write pyproject authors", "pre", write("pyproject.toml", pyproject), 0, env)
+        expect("write pyproject email elsewhere", "pre", write("pyproject.toml", pyproject + f'description = "mail {realmail}"\n'), 2, env)
+        expect("write pyproject phone in authors", "pre", write("pyproject.toml", f'[project]\nauthors = [{{ name = "Jane {phone}" }}]\n'), 2, env)
+        expect("write Cargo.toml authors", "pre", write("Cargo.toml", f'[package]\nname = "x"\nauthors = ["Jane Q Tester <{realmail}>"]\n'), 0, env)
+        expect("write Cargo.toml email in a comment", "pre", write("Cargo.toml", f'[package]\nauthors = ["Jane"]\n# ask {realmail}\n'), 2, env)
+        # only the manifest's own contact fields: a contact key elsewhere is ordinary content
+        expect("write package.json nested owner", "pre", write("package.json", manifest(config={"owner": realmail})), 2, env)
+        expect("write package.json deep author", "pre", write("package.json", manifest(x={"y": {"author": realmail}})), 2, env)
+        expect(
+            "write marketplace.json plugin owner",
+            "pre",
+            write("marketplace.json", json.dumps({"name": "m", "plugins": [{"name": "p", "owner": author}]}, indent=2)),
+            2,
+            env,
+        )
+        expect("write pyproject authors in another table", "pre", write("pyproject.toml", f'[tool.foo]\nauthors = ["{realmail}"]\n'), 2, env)
+        expect("write pyproject authors in a string", "pre", write("pyproject.toml", f'[project]\ndescription = """\nauthors = ["{realmail}"]\n"""\n'), 2, env)
+        expect("write pyproject authors after a long string", "pre", write("pyproject.toml", f'[project]\ndescription = """\n[tool.foo]\n"""\nauthors = ["{realmail}"]\n'), 0, env)
+        expect("write Cargo.toml workspace authors", "pre", write("Cargo.toml", f'[workspace.package]\nauthors = ["Jane <{realmail}>"]\n'), 0, env)
+        # qa: manifests are known by file name, wherever they sit; look-alike names are not manifests
+        expect("qa: write .claude-plugin/plugin.json author", "pre", write(".claude-plugin/plugin.json", manifest(author=author)), 0, env)
+        expect("qa: write packages/web/package.json author", "pre", write("packages/web/package.json", manifest(author=author)), 0, env)
+        expect("qa: write libs/a/pyproject.toml authors", "pre", write("libs/a/pyproject.toml", pyproject), 0, env)
+        expect("qa: write my-plugin.json author", "pre", write("my-plugin.json", manifest(author=author)), 2, env)
+        expect("qa: write plugin.json.bak author", "pre", write("plugin.json.bak", manifest(author=author)), 2, env)
+        expect("qa: write composer.json authors", "pre", write("composer.json", manifest(authors=[author])), 2, env)
+        expect("qa: write data.json with only an author key", "pre", write("data.json", json.dumps({"author": realmail})), 2, env)
+        # qa: nested author objects and string forms are contacts; any other field or kind is not
+        expect("qa: write package.json nested author object", "pre", write("package.json", manifest(author={**author, "url": "https://example.org", "links": {"mail": f"mailto:{realmail}"}})), 0, env)
+        expect("qa: write package.json author string with url", "pre", write("package.json", manifest(author=f"Jane Q Tester <{realmail}> (https://example.org)")), 0, env)
+        expect("qa: write package.json maintainers objects", "pre", write("package.json", manifest(maintainers=[author], owner=author)), 0, env)
+        expect("qa: write package.json email in description", "pre", write("package.json", manifest(author=author, description=f"contact {realmail}")), 2, env)
+        dup = '{"name": "x", "description": "' + realmail + '", "description": "ok", "author": "Jane"}\n'
+        expect("qa: write package.json duplicate key hides an email", "pre", write("package.json", dup), 2, env)
+        card = "4539 1488 " + "0343 6467"
+        expect("qa: write package.json card in contributors", "pre", write("package.json", manifest(contributors=[{**author, "card": card}])), 2, env)
+        expect("qa: write broken package.json with email", "pre", write("package.json", manifest(author=author)[:-3]), 2, env)
+        expect("qa: write marketplace.json email in plugin description", "pre", write("marketplace.json", json.dumps({"name": "m", "owner": author, "plugins": [{"name": "p", "author": author, "description": f"mail {realmail}"}]}, indent=2)), 2, env)
+        # qa: TOML arrays: multi-line, poetry, and what is not an authors array of the right table
+        expect("qa: write poetry authors", "pre", write("pyproject.toml", f'[tool.poetry]\nname = "x"\nauthors = ["Jane Q Tester <{realmail}>"]\n'), 0, env)
+        expect("qa: write Cargo.toml multi-line authors", "pre", write("Cargo.toml", f'[package]\nname = "x"\nauthors = [\n  "Jane Q Tester <{realmail}>",\n  "Jo <{realmail}>",\n]\n'), 0, env)
+        expect("qa: write pyproject unclosed authors array", "pre", write("pyproject.toml", f'[project]\nauthors = [\n  {{ email = "{realmail}" }},\n'), 2, env)
+        expect("qa: write pyproject authors under project.urls", "pre", write("pyproject.toml", f'[project]\nname = "x"\n[project.urls]\nauthors = ["{realmail}"]\n'), 2, env)
+        expect("qa: write pyproject header inside a literal string", "pre", write("pyproject.toml", f"[tool.foo]\nx = '''\n[project]\n'''\nauthors = [\"{realmail}\"]\n"), 2, env)
+        expect("qa: write pyproject comment after authors", "pre", write("pyproject.toml", f'[project]\nauthors = [{{ name = "Jane" }}] # {realmail}\n'), 2, env)
+        expect("qa: write Cargo.toml email in description", "pre", write("Cargo.toml", f'[package]\nauthors = ["Jane <{realmail}>"]\ndescription = "mail {realmail}"\n'), 2, env)
+        expect("qa: write Cargo.toml phone in authors", "pre", write("Cargo.toml", f'[package]\nauthors = ["Jane {phone}"]\n'), 2, env)
+        expect("qa: write Cargo.toml authors under dependencies", "pre", write("Cargo.toml", f'[dependencies]\nauthors = ["{realmail}"]\n'), 2, env)
+        # qa: a manifest written through a heredoc follows the same rules
+        expect("qa: heredoc .claude-plugin/plugin.json author", "pre", sh(f"cat > .claude-plugin/plugin.json <<'EOF'\n{manifest(author=author)}EOF", proj), 0, env)
+        expect("qa: heredoc plugin.json phone in author", "pre", sh(f"cat > plugin.json <<'EOF'\n{manifest(author={'name': 'Jane', 'url': phone})}EOF", proj), 2, env)
+        expect("qa: heredoc plugin.json email in description", "pre", sh(f"cat > plugin.json <<'EOF'\n{manifest(author=author, description=f'mail {realmail}')}EOF", proj), 2, env)
+        # heredoc bodies are scanned like written files
+        expect("heredoc body email", "pre", sh(f"cat <<'EOF' > notes.md\nping {realmail}\nEOF", proj), 2, env)
+        expect("heredoc body email shown, not written", "pre", sh(f"cat <<'EOF'\nping {realmail}\nEOF", proj), 0, env)
+        expect("heredoc commit message email", "pre", sh(f"git commit -F - <<'EOF'\nfix: thanks {realmail}\nEOF", proj), 2, env)
+        expect("heredoc body email into LICENSE", "pre", sh(f"cat > LICENSE <<'EOF'\nCopyright Jane <{realmail}>\nEOF", proj), 0, env)
+        expect("heredoc body manifest author", "pre", sh(f"cat > package.json <<'EOF'\n{manifest(author=author)}EOF", proj), 0, env)
+        expect("unquoted expanding heredoc body email", "pre", sh(f"cat <<EOF > notes.md\n$HOME ping {realmail}\nEOF", proj), 2, env)
+        # git add scans the whole file, git commit the added lines of the staged blob
+        (proj / "plugin.json").write_text(manifest(author=author))
+        expect("git add plugin.json author", "pre", sh("git add plugin.json", proj), 0, env)
+        g("add", "plugin.json")
+        expect("git commit staged plugin.json author", "pre", sh("git commit -m 'feat: x'", proj), 0, env)
+        g("commit", "-qm", "manifest")
+        (proj / "plugin.json").write_text(manifest(author=author).replace("1.0.0", "1.0.1"))
+        expect("git add version bump", "pre", sh("git add plugin.json", proj), 0, env)
+        g("add", "plugin.json")
+        expect("git commit version bump", "pre", sh("git commit -m 'chore: bump'", proj), 0, env)
+        (proj / "plugin.json").write_text(manifest(author=author, homepage=f"mailto:{realmail}"))
+        expect("git add plugin.json email elsewhere", "pre", sh("git add plugin.json", proj), 2, env)
+        g("add", "plugin.json")
+        expect("git commit staged email elsewhere", "pre", sh("git commit -m x", proj), 2, env)
+        g("commit", "-qm", "homepage")
+        (proj / "plugin.json").write_text(manifest(author=author, homepage=f"mailto:{realmail}").replace("1.0.0", "1.0.2"))
+        g("add", "plugin.json")
+        expect("git commit only scans added manifest lines", "pre", sh("git commit -m 'chore: bump'", proj), 0, env)
+        (proj / "plugin.json").write_text(manifest(author={"name": "Jane", "email": realmail, "url": phone}))
+        expect("git add manifest with phone", "pre", sh("git add plugin.json", proj), 2, env)
+        g("add", "plugin.json")
+        expect("git commit staged manifest with phone", "pre", sh("git commit -m x", proj), 2, env)
+        g("reset", "-q", "--", "plugin.json")
+        g("checkout", "-q", "--", "plugin.json")
+
+        # qa: staged manifests in a subdirectory, TOML manifests and a look-alike json
+        (proj / ".claude-plugin").mkdir(exist_ok=True)
+        (proj / ".claude-plugin" / "plugin.json").write_text(manifest(author=author))
+        expect("qa: git add subdirectory manifest author", "pre", sh("git add .claude-plugin/plugin.json", proj), 0, env)
+        g("add", ".claude-plugin/plugin.json")
+        expect("qa: git commit staged subdirectory manifest author", "pre", sh("git commit -m 'feat: x'", proj), 0, env)
+        expect("qa: git commit staged manifest author from a subdirectory", "pre", sh("git commit -m 'feat: x'", proj / ".claude-plugin"), 0, env)
+        g("reset", "-q", "--", ".claude-plugin/plugin.json")
+        (proj / "Cargo.toml").write_text(f'[package]\nname = "x"\nauthors = [\n  "Jane Q Tester <{realmail}>",\n]\n')
+        expect("qa: git add Cargo.toml authors", "pre", sh("git add Cargo.toml", proj), 0, env)
+        g("add", "Cargo.toml")
+        expect("qa: git commit staged Cargo.toml authors", "pre", sh("git commit -m 'feat: x'", proj), 0, env)
+        g("reset", "-q", "--", "Cargo.toml")
+        (proj / "Cargo.toml").write_text(f'[package]\nauthors = ["Jane {phone}"]\n')
+        expect("qa: git add Cargo.toml phone in authors", "pre", sh("git add Cargo.toml", proj), 2, env)
+        (proj / "src" / "meta.json").write_text(manifest(author=author))
+        expect("qa: git add non-manifest json with author email", "pre", sh("git add src/meta.json", proj), 2, env)
+        g("add", "src/meta.json")
+        expect("qa: git commit staged non-manifest json with author email", "pre", sh("git commit -m x", proj), 2, env)
+        g("reset", "-q", "--", "src/meta.json")
+        (proj / "src" / "meta.json").unlink()
+        (proj / "Cargo.toml").unlink()
+        (proj / ".claude-plugin" / "plugin.json").unlink()
+        (proj / ".claude-plugin").rmdir()
+
+        # challenger: a heredoc body that reaches a shell or interpreter runs, whatever command feeds it
+        cred = "cred" + "entials"
+        expect("challenger: cat heredoc piped to bash", "pre", sh(f"cat <<'EOF' | bash\ncat ~/.aws/{cred}\nEOF", proj), 2, env)
+        expect("challenger: cat heredoc piped to python", "pre", sh(f"cat <<'EOF' | python3 -\nprint(open('{cred}').read())\nEOF", proj), 2, env)
+        # challenger: git apply/am read the body as a patch that names the files it writes
+        patch = "diff --git a/.env b/.env\nnew file mode 100644\n--- /dev/null\n+++ b/.env\n@@ -0,0 +1 @@\n+X=1\n"
+        expect("challenger: git apply heredoc writes .env", "pre", sh(f"git apply <<'EOF'\n{patch}EOF", proj), 2, env)
+        # challenger: a `<<` inside quotes or a comment is not a heredoc; the next lines are commands
+        expect("challenger: quoted << is not a heredoc", "pre", sh(f'git log --grep "<<X"\ncat ~/.aws/{cred}\nX', proj), 2, env)
+        expect("challenger: commented << is not a heredoc", "pre", sh(f"git status # <<X\ncat ~/.aws/{cred}\nX", proj), 2, env)
+        # challenger: a heredoc piped into tee is written to a file like `tee f <<EOF`
+        expect("challenger: heredoc piped to tee scanned for pii", "pre", sh(f"cat <<'EOF' | tee notes.md\nping {realmail}\nEOF", proj), 2, env)
+        # challenger: the staged-diff parser must not depend on the user's diff prefix or color config
+        g("config", "diff.mnemonicPrefix", "true")
+        newmail = "jq.tester" + "@" + "gmail.com"
+        (proj / "plugin.json").write_text(manifest(author={"name": "Jane Q Tester", "email": newmail}))
+        g("add", "plugin.json")
+        expect("challenger: commit manifest author with diff.mnemonicPrefix", "pre", sh("git commit -m 'chore: bump'", proj), 0, env)
+        g("config", "--unset", "diff.mnemonicPrefix")
+        g("reset", "-q", "--", "plugin.json")
+        g("checkout", "-q", "--", "plugin.json")
+        g("config", "color.diff", "always")
+        (proj / "src" / "leak.py").write_text(f"K = '{GHP}'\n")
+        g("add", "src/leak.py")
+        expect("challenger: commit secret with color.diff=always", "pre", sh("git commit -m x", proj), 2, env)
+        g("config", "--unset", "color.diff")
+        (proj / "sub").mkdir()
+        g("config", "diff.relative", "true")
+        expect("commit secret outside the cwd with diff.relative", "pre", sh("git commit -m x", proj / "sub"), 2, env)
+        g("config", "--unset", "diff.relative")
+        (proj / "sub").rmdir()
+        g("reset", "-q", "--", "src/leak.py")
+        (proj / "src" / "leak.py").unlink()
+
         # ---- post: redaction
         rc, out, err = run(
             "post",
@@ -531,6 +791,13 @@ def main():
             FAILS.append("deny reason leaked the secret value")
         else:
             PASSES_inc()
+        # qa: the pii deny reasons of the heredoc and manifest paths never carry the value
+        rc, out, err = run("pre", sh(f"cat <<'EOF' > notes.md\nping {realmail}\nEOF", proj), env)
+        check("qa: heredoc pii deny reason lacks the email", rc == 2 and realmail not in err + out, rc, out + err)
+        rc, out, err = run("pre", write("plugin.json", manifest(author=author, description=f"mail {realmail}")), env)
+        check("qa: manifest pii deny reason lacks the email", rc == 2 and realmail not in err + out, rc, out + err)
+        rc, out, err = run("pre", write("Cargo.toml", f'[package]\nauthors = ["Jane {phone}"]\n'), env)
+        check("qa: manifest phone deny reason lacks the number", rc == 2 and phone not in err + out, rc, out + err)
 
         import shutil
 

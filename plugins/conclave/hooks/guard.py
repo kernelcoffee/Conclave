@@ -7,7 +7,11 @@ Modes (first argument):
   stop  Stop / SubagentStop  refuse a final message that contains a secret
 
 Rules (names used in the deny reason and in CONCLAVE_ALLOW):
-  read-secret-file     Read, Grep, Glob, Bash and Edit/Write on secret files
+  read-secret-file     Read, Grep, Glob, Bash and Edit/Write on secret files (a heredoc
+                       body that only cat or tee show or write, or that git commit/tag/notes
+                       -F - or gh --body-file - read as a message, is text, not filenames,
+                       unless it is unquoted and has a `$` or backtick for bash to expand;
+                       a `-m` or `--body` value from `"$(cat <<'EOF' ...)"` is text too)
   write-secret         secret-looking content in Write/Edit/Bash
   commit-secret        git add/commit of a secret file or secret content
   send-data-out        request bodies, uploads or literal credentials to hosts outside
@@ -25,8 +29,11 @@ Rules (names used in the deny reason and in CONCLAVE_ALLOW):
                        CONCLAVE_ALLOW=commit-approval when the user said so
   pii                  personal or identifiable information (email addresses, phone
                        numbers, home-directory paths, the local git identity, card,
-                       IBAN or national id numbers) in written files, staged changes,
-                       commit or PR text, or data sent out
+                       IBAN or national id numbers) in written files, heredoc text,
+                       staged changes, commit or PR text, or data sent out; in the author,
+                       maintainer, contributor and owner fields of plugin.json,
+                       marketplace.json, package.json, pyproject.toml and Cargo.toml an
+                       email or the git identity is a public contact
 
 Overrides come from the environment Claude Code was started with, never from the command
 line (an inline CONCLAVE_* assignment is itself denied):
@@ -236,13 +243,130 @@ def pii_exempt(path):
     return bool(name) and any(fnmatch.fnmatch(name.upper(), g.upper()) for g in PII_EXEMPT_FILES)
 
 
-def find_pii(text, cwd=None):
-    """Return [(kind, line)] for personal or identifiable values in text. Never the value."""
+# Package manifests name their authors on purpose. In these fields an email address or the
+# local git identity is a public contact; every other kind of pii still counts there, and
+# the rest of the manifest is scanned as usual.
+JSON_CONTACT_KEYS = {"author", "authors", "maintainers", "contributors", "owner"}
+# Where each JSON manifest names its contacts, by path from the root ("[]" is an array
+# item): the keys of the top-level object, and in marketplace.json each plugin's author.
+JSON_CONTACT_PLACES = {
+    "plugin.json": {(): JSON_CONTACT_KEYS},
+    "package.json": {(): JSON_CONTACT_KEYS},
+    "marketplace.json": {(): JSON_CONTACT_KEYS, ("plugins", "[]"): {"author"}},
+}
+JSON_TOKEN = re.compile(r'"(?:[^"\\]|\\.)*"|[{}\[\],:]')
+# TOML manifests name their contacts in `authors = [...]` or `maintainers = [...]`, one line
+# or several, under these tables only; a quoted `]` does not end the array. Anything the
+# pattern cannot read is left to the normal scan.
+TOML_CONTACT_TABLES = {"pyproject.toml": {"project", "tool.poetry"}, "Cargo.toml": {"package", "workspace.package"}}
+TOML_CONTACT = re.compile(
+    r"""(?m)^[ \t]*(?:authors|maintainers)[ \t]*=[ \t]*(\[(?:"(?:[^"\\\n]|\\.)*"|'[^'\n]*'|[^\]"'])*\])"""
+)
+TOML_TABLE = re.compile(r"(?m)^[ \t]*(\[\[?)[ \t]*([^\[\]\n]*?)[ \t]*\]")
+# Strings and comments, so that a line inside a multi-line string is not read as a key.
+TOML_INERT = re.compile(r'"""(?:[^\\]|\\.)*?"""|\'\'\'.*?\'\'\'|"(?:[^"\\\n]|\\.)*"|\'[^\'\n]*\'|#[^\n]*', re.S)
+CONTACT_MANIFESTS = JSON_CONTACT_PLACES.keys() | TOML_CONTACT_TABLES.keys()
+
+
+class _JsonLevel:
+    """An object or array met while walking a JSON manifest's tokens."""
+
+    def __init__(self, bracket, in_contact, contact_keys, path):
+        self.bracket = bracket
+        self.in_contact = in_contact  # the whole container is a contact value
+        self.contact_keys = contact_keys  # keys of this object that hold a contact
+        self.path = path
+        self.key = None
+        self.expect_key = bracket == "{"
+
+
+def json_contact_spans(text, places):
+    """Spans of the string values under the contact keys at the given places of a JSON document."""
+    try:
+        json.loads(text)
+    except (json.JSONDecodeError, RecursionError):
+        return []
+    spans = []
+    stack = []
+    for m in JSON_TOKEN.finditer(text):
+        tok = m.group(0)
+        top = stack[-1] if stack else None
+        in_contact = top is not None and (
+            top.in_contact or (top.bracket == "{" and not top.expect_key and top.key in top.contact_keys)
+        )
+        if tok in ("{", "["):
+            path = () if top is None else (*top.path, top.key if top.bracket == "{" else "[]")
+            keys = places.get(path, set()) if tok == "{" and not in_contact else set()
+            stack.append(_JsonLevel(tok, in_contact, keys, path))
+        elif tok in ("}", "]"):
+            stack.pop()
+        elif tok == ":":
+            top.expect_key = False
+        elif tok == ",":
+            top.expect_key = top.bracket == "{"
+        elif top is not None and top.expect_key:
+            top.key = json.loads(tok)
+        elif in_contact:
+            spans.append(m.span())
+    return spans
+
+
+def toml_contact_spans(text, tables):
+    """Spans of the `authors` and `maintainers` arrays of the given tables of a TOML document."""
+    inert = [m.span() for m in TOML_INERT.finditer(text)]
+    multiline = [(s, e) for s, e in inert if text.startswith(('"""', "'''"), s)]
+
+    def is_inert(pos):
+        return any(s <= pos < e for s, e in inert)
+
+    headers = []
+    for m in TOML_TABLE.finditer(text):
+        if not is_inert(m.start(1)):
+            name = re.sub(r"[ \t]*\.[ \t]*", ".", m.group(2))
+            headers.append((m.start(), name if m.group(1) == "[" else None))
+    spans = []
+    for m in TOML_CONTACT.finditer(text):
+        start, end = m.span(1)
+        if any(s < end and start < e for s, e in multiline):  # the array is not inside a string
+            continue
+        table = next((name for pos, name in reversed(headers) if pos < m.start()), None)
+        if table in tables:
+            spans.append((start, end))
+    return spans
+
+
+def public_contact_spans(path, text):
+    """Character spans of a manifest's author and maintainer fields; empty for other files."""
+    name = Path(str(path)).name if path else ""
+    if not text:
+        return []
+    if name in JSON_CONTACT_PLACES:
+        return json_contact_spans(text, JSON_CONTACT_PLACES[name])
+    if name in TOML_CONTACT_TABLES:
+        return toml_contact_spans(text, TOML_CONTACT_TABLES[name])
+    return []
+
+
+def find_file_pii(path, text, cwd=None):
+    """find_pii for the content of a file: exempt files skip it, manifest contact fields are public."""
+    if pii_exempt(path):
+        return []
+    return find_pii(text, cwd, public_contact_spans(path, text))
+
+
+def find_pii(text, cwd=None, public=()):
+    """Return [(kind, line)] for personal or identifiable values in text. Never the value.
+
+    `public` holds character spans of public-contact fields: an email address or the local
+    git name or email inside one is not reported; any other kind is.
+    """
     hits = []
     if not text:
         return hits
 
-    def add(kind, pos):
+    def add(kind, pos, contact=False):
+        if contact and any(start <= pos < end for start, end in public):
+            return
         hits.append((kind, text.count("\n", 0, pos) + 1))
 
     for m in EMAIL.finditer(text):
@@ -254,7 +378,7 @@ def find_pii(text, cwd=None):
             continue
         if domain.lower() in ("anthropic.com",) and local.lower().startswith("noreply"):
             continue
-        add("email address", m.start())
+        add("email address", m.start(), contact=True)
     for m in PHONE.finditer(text):
         digits = re.sub(r"\D", "", m.group(0))
         if 9 <= len(digits) <= 15 and m.group(0).strip().lower() not in PII_ALLOW:
@@ -280,9 +404,12 @@ def find_pii(text, cwd=None):
         if len(re.sub(r"\D", "", m.group(0))) >= 13:
             add("national id number", m.start())
     for value in local_identity(cwd):
+        # every occurrence: one inside a public-contact field must not hide one outside it.
+        # The home path is never a contact, whatever field it sits in.
         idx = text.find(value)
-        if idx >= 0:
-            add("the local user's identity (git name or email, home path)", idx)
+        while idx >= 0:
+            add("the local user's identity (git name or email, home path)", idx, contact=value != str(HOME))
+            idx = text.find(value, idx + 1)
     return hits
 
 
@@ -447,7 +574,7 @@ def inside_project(path, data):
 
 def git(args, cwd):
     try:
-        r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=15)
+        r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, errors="replace", timeout=15)
         return r.returncode, r.stdout
     except (OSError, subprocess.TimeoutExpired):
         return 1, ""
@@ -481,14 +608,390 @@ WRAPPERS = {"sudo", "env", "nice", "time", "nohup", "command", "exec", "stdbuf",
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish"}
 
 
-def tokenize(cmd):
+def strict_tokens(cmd):
+    """Shell words and operators of cmd, or None when its quotes do not balance."""
     lex = shlex.shlex(cmd, posix=True, punctuation_chars=";&|()<>")
     lex.whitespace_split = True
     lex.commenters = ""
     try:
         return list(lex)
     except ValueError:
-        return cmd.split()
+        return None
+
+
+def tokenize(cmd):
+    toks = strict_tokens(cmd)
+    return cmd.split() if toks is None else toks
+
+
+# ---- heredocs ----------------------------------------------------------------------
+# A heredoc body is text only when the shell reads it as text, so the command is scanned
+# the way bash reads it: `<<` counts outside quotes and comments only, and anything the scan
+# does not model (backticks, `$[ ]`, `${ }`, `case`, a heredoc inside `( )`, an operator it
+# cannot read whole) leaves every body in place. An unquoted body (`<<EOF`) with a `$` or a
+# backtick in it is expanded by bash, so it is never text either.
+HEREDOC_OP = re.compile(r"""<<(-?)[ \t]*(?:'([^'\n]+)'|"([^"\n]+)"|\\?([A-Za-z_][A-Za-z0-9_.-]*))""")
+SHELL_BREAK = " \t\n;&|()<>"
+# Commands that show or write their input as it is.
+TEXT_SINKS = {"cat", "tee"}
+# Subcommands that take a heredoc or an argument as message text and never run it.
+GIT_MESSAGE_SUBS = {"commit", "tag", "notes"}
+GH_BODY_SUBS = {("pr", "create"), ("pr", "edit"), ("pr", "comment"), ("pr", "review"), ("pr", "merge"),
+                ("issue", "create"), ("issue", "edit"), ("issue", "comment"), ("release", "create"),
+                ("release", "edit")}
+# Options whose `-` value makes git or gh read stdin as the message, and the ones that open an
+# editor, which would inherit that stdin.
+GIT_STDIN_OPTS = ("-F", "--file")
+GH_STDIN_OPTS = ("-F", "--body-file", "--notes-file")
+EDITOR_OPTS = {"-e", "--edit", "--editor"}
+# git global options that can make git run a configured command (an editor, a hook, a pager).
+GIT_CONFIG_OPTS = ("-c", "--config-env", "--exec-path")
+# Options whose value is message text, not a file. A short git cluster such as `-am` ends in
+# -m after flags that take no value.
+GIT_MESSAGE_OPTS = {"-m", "--message"}
+GIT_SHORT_MESSAGE = re.compile(r"-[asnvqeziop]*m")
+GH_MESSAGE_OPTS = {"-b", "--body", "-t", "--title", "--subject", "-n", "--notes"}
+ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# Stands for the `$` of the substitution being classified, so its word can be found.
+SUBST_MARK = "\x00"
+
+
+class Frame:
+    """A context met while scanning a command: the top level, `$(`, `(` or a double quote."""
+
+    def __init__(self, kind, start):
+        self.kind = kind
+        self.start = start  # first offset inside the context
+        self.end = None  # offset of the closing character
+        self.breaks = []  # (start, end) of each statement break: ; ;; && || & newline
+
+    def statement(self, at, length):
+        """(start, end) of the statement of this context that holds offset at."""
+        start = max((e for s, e in self.breaks if e <= at), default=self.start)
+        end = min((s for s, e in self.breaks if s >= at), default=length if self.end is None else self.end)
+        return start, end
+
+
+class Heredoc:
+    def __init__(self, frames, op, match):
+        self.frames = frames  # contexts holding the operator, from the top level in
+        self.op = op  # (start, end) of the operator
+        self.strip = bool(match.group(1))
+        self.word = match.group(2) or match.group(3) or match.group(4)
+        self.unquoted = match.group(4) is not None and "\\" not in match.group(0)
+        self.body = (0, 0)  # the body; the terminator line follows it
+
+
+def _quote_end(cmd, i):
+    """Offset after the '...' or $'...' string at i; None when it is not closed."""
+    if cmd[i] == "'":
+        end = cmd.find("'", i + 1)
+        return None if end < 0 else end + 1
+    j = i + 2
+    while j < len(cmd):
+        if cmd[j] == "\\":
+            j += 2
+        elif cmd[j] == "'":
+            return j + 1
+        else:
+            j += 1
+    return None
+
+
+def _read_bodies(cmd, i, pending, frame, docs):
+    """Read the bodies of the pending heredocs after the newline at i.
+
+    Returns the offset of the newline that ends the last terminator, or None when a body
+    is not closed the way bash closes it.
+    """
+    for doc in pending:
+        if doc.frames[-1] is not frame:
+            return None
+        body = k = i + 1
+        while True:
+            if k > len(cmd):
+                return None
+            e = cmd.find("\n", k)
+            e = len(cmd) if e < 0 else e
+            line = cmd[k:e]
+            text = line.lstrip("\t") if doc.strip else line
+            if text == doc.word:
+                break
+            # inside $( ), bash also ends the body at a line that only starts with the word
+            if len(doc.frames) > 1 and text.startswith(doc.word):
+                return None
+            # an unquoted body joins a line that ends in a backslash to the next one
+            if doc.unquoted and (len(line) - len(line.rstrip("\\"))) % 2:
+                return None
+            if e == len(cmd):
+                return None
+            k = e + 1
+        doc.body = (body, k)
+        docs.append(doc)
+        i = e
+    pending.clear()
+    return i
+
+
+def scan_heredocs(cmd):
+    """(heredocs, cuts) of cmd read as bash reads it; None when it holds what the scan does not model.
+
+    cuts are the comments and heredoc operators: text that is not a shell word.
+    """
+    n = len(cmd)
+    stack = [Frame("top", 0)]
+    pending, docs, cuts = [], [], []
+    i = 0
+    while i < n:
+        c, f = cmd[i], stack[-1]
+        if c == "\\":
+            i += 2
+        elif c == "`" or cmd.startswith(("$[", "${"), i):
+            return None
+        elif f.kind == '"':
+            if c == '"':
+                f.end = i
+                stack.pop()
+                i += 1
+            elif cmd.startswith("$(", i):
+                stack.append(Frame("$(", i + 2))
+                i += 2
+            else:
+                i += 1
+        elif c == "'" or cmd.startswith("$'", i):
+            i = _quote_end(cmd, i)
+            if i is None:
+                return None
+        elif c == '"':
+            stack.append(Frame('"', i + 1))
+            i += 1
+        elif c == "#" and (i == 0 or cmd[i - 1] in SHELL_BREAK):
+            end = cmd.find("\n", i)
+            end = n if end < 0 else end
+            cuts.append((i, end))
+            i = end
+        elif cmd.startswith("$(", i):
+            stack.append(Frame("$(", i + 2))
+            i += 2
+        elif c == "(":
+            stack.append(Frame("(", i + 1))
+            i += 1
+        elif c == ")":
+            if f.kind == "top":
+                return None
+            f.end = i
+            stack.pop()
+            i += 1
+        elif cmd.startswith("<<<", i):
+            i += 3
+        elif cmd.startswith("<<", i):
+            m = HEREDOC_OP.match(cmd, i)
+            if not m or (m.end() < n and cmd[m.end()] not in SHELL_BREAK):
+                return None
+            pending.append(Heredoc(tuple(stack), (i, m.end()), m))
+            cuts.append((i, m.end()))
+            i = m.end()
+        elif c == "\n":
+            f.breaks.append((i, i + 1))
+            i = _read_bodies(cmd, i, pending, f, docs) if pending else i + 1
+            if i is None:
+                return None
+        elif c in ";&|":
+            w = 2 if cmd.startswith(("&&", "||", ";;"), i) else 1
+            redirect = c == "&" and w == 1 and (cmd[i - 1 : i] in ("<", ">") or cmd[i + 1 : i + 2] == ">")
+            if not (c == "|" and w == 1 or redirect):  # a pipe continues the statement
+                f.breaks.append((i, i + w))
+            i += w
+        elif (
+            cmd.startswith("case", i)
+            and (i == 0 or cmd[i - 1] in SHELL_BREAK)
+            and cmd[i + 4 : i + 5] in ("", *SHELL_BREAK)
+        ):
+            return None  # its `pattern)` closes no `(`
+        else:
+            i += 1
+    if len(stack) != 1 or pending:
+        return None
+    return docs, cuts
+
+
+def _words(cmd, frame, at, blanks):
+    """Words of the statement of frame that holds offset at, with blanks spaced out; None if unbalanced."""
+    start, end = frame.statement(at, len(cmd))
+    chars = list(cmd[start:end])
+    for s, e in blanks:
+        for k in range(max(s, start), min(e, end)):
+            chars[k - start] = " "
+    return strict_tokens("".join(chars))
+
+
+def _message_args(toks):
+    """Arguments after the subcommand when toks is a git or gh command that takes message text."""
+    sub, args = git_parts(toks)
+    if sub in GIT_MESSAGE_SUBS:
+        return args
+    if toks and Path(toks[0]).name == "gh" and len(toks) >= 3 and (toks[1], toks[2]) in GH_BODY_SUBS:
+        return toks[3:]
+    return None
+
+
+def _names_stdin(args, opts):
+    """True when args give `-` as the value of one of opts: `-F -`, `-F-`, `--file=-`."""
+    for k, a in enumerate(args):
+        for o in opts:
+            attached = o + ("=-" if o.startswith("--") else "-")
+            if a == attached or (a == o and args[k + 1 : k + 2] == ["-"]):
+                return True
+    return False
+
+
+def _stdin_message(stage, words):
+    """True when a git or gh stage reads its stdin as message text and nothing it runs reads it.
+
+    That takes `-F -` (git commit/tag/notes) or `--body-file -` (gh), no editor option, and
+    no `-c` or variable assignment that could name an editor or a hook to run instead.
+    """
+    if any(ASSIGNMENT.match(t) for t in stage[: len(stage) - len(words)]):
+        return False
+    if any(t in EDITOR_OPTS for t in words):
+        return False
+    if Path(words[0]).name == "git":
+        sub, args = git_parts(words)
+        options = words[1 : len(words) - len(args) - 1]
+        if sub not in GIT_MESSAGE_SUBS or any(t.startswith(GIT_CONFIG_OPTS) for t in options):
+            return False
+        return _names_stdin(args, GIT_STDIN_OPTS)
+    args = _message_args(words)
+    return args is not None and _names_stdin(args, GH_STDIN_OPTS)
+
+
+def _sink_targets(toks):
+    """Files a pipeline of text sinks writes to; None when any stage is something else."""
+    if toks is None or any(t in OPERATORS and t not in ("|", "|&") for t in toks):
+        return None
+    targets, stage = [], []
+    for t in [*toks, "|"]:
+        if t not in ("|", "|&"):
+            stage.append(t)
+            continue
+        words = strip_wrappers(stage)
+        if not words or (Path(words[0]).name not in TEXT_SINKS and not _stdin_message(stage, words)):
+            return None
+        targets += [words[k + 1] for k in range(len(words) - 1) if words[k] in REDIRECTS]
+        if Path(words[0]).name == "tee":
+            targets += [
+                w for k, w in enumerate(words[1:], 1)
+                if not w.startswith("-") and w not in REDIRECTS and words[k - 1] not in REDIRECTS
+            ]
+        stage = []
+    return targets
+
+
+def _message_option(prefix, prev, git):
+    """True when a word that starts with prefix, after the word prev, is a message option's value."""
+    if git:
+        if prefix.startswith("--message=") or (not prefix.startswith("--") and GIT_SHORT_MESSAGE.match(prefix)):
+            return True
+        return not prefix.startswith("-") and (prev in GIT_MESSAGE_OPTS or bool(GIT_SHORT_MESSAGE.fullmatch(prev)))
+    long_opts = tuple(o + "=" for o in GH_MESSAGE_OPTS if o.startswith("--"))
+    short_opts = tuple(o for o in GH_MESSAGE_OPTS if not o.startswith("--"))
+    if prefix.startswith(long_opts) or (not prefix.startswith("--") and prefix.startswith(short_opts)):
+        return True
+    return not prefix.startswith("-") and prev in GH_MESSAGE_OPTS
+
+
+def _subst_use(cmd, doc, blanks):
+    """How a git or gh message command uses the `"$(cat <<EOF ...)"` argument holding doc.
+
+    "message" when it is the value of a message option (`-m`, `--body`), "argument" for any
+    other argument after the subcommand (`-F` names a file), None when the command is not a
+    git or gh message command or the substitution comes before the subcommand, where it may
+    run (`git -c core.editor=...`).
+    """
+    if SUBST_MARK in cmd:
+        return None
+    mark = doc.frames[2].start - 2  # the `$` of its `$(`
+    toks = _words(cmd[:mark] + SUBST_MARK + cmd[mark + 1 :], doc.frames[0], doc.op[0], blanks)
+    if toks is None or any(t in OPERATORS for t in toks):
+        return None
+    words = strip_wrappers(toks)
+    args = _message_args(words)
+
+    def subst(t):
+        return "$(" in t or SUBST_MARK in t
+
+    if args is None or sum(map(subst, toks)) != sum(map(subst, args)):
+        return None
+    at = next((k for k, t in enumerate(args) if SUBST_MARK in t), None)
+    if at is None:
+        return None
+    prefix = args[at].split(SUBST_MARK, 1)[0]
+    prev = args[at - 1] if at else ""
+    return "message" if _message_option(prefix, prev, Path(words[0]).name == "git") else "argument"
+
+
+def _substitutions(text):
+    """The command text of each `$( )` and backtick substitution in text, outer and inner."""
+    found = [m.group(1) for m in re.finditer(r"`([^`]*)`", text)]
+    start = text.find("$(")
+    while start >= 0:
+        depth, k = 1, start + 2
+        while k < len(text) and depth:
+            depth += {"(": 1, ")": -1}.get(text[k], 0)
+            k += 1
+        found.append(text[start + 2 : k - 1 if depth == 0 else k])
+        start = text.find("$(", start + 2)
+    return found
+
+
+def split_heredocs(cmd):
+    """Return (cmd without its text heredoc bodies, [(files written, body)], [argument values],
+    [substitutions]).
+
+    A body is text when the whole pipeline it feeds shows, writes or takes it as a message:
+    cat and tee, or git commit/tag/notes and the gh subcommands that take a body, reading it
+    through `-F -` or `--body-file -`. Those bodies are removed, operator and terminator lines
+    kept, so a redirect target is still checked. A body inside `"$(cat <<EOF ...)"` is one
+    argument: removed when a git or gh message command takes it, and returned to be checked as
+    a filename unless it is a message option's value. An unquoted body with a `$` or backtick
+    is expanded by bash, so it always stays, and the commands of its substitutions are
+    returned to be checked. Every other body stays: it may run.
+    """
+    scan = scan_heredocs(cmd)
+    if scan is None:
+        return cmd, [], [], []
+    docs, cuts = scan
+    if any(f.kind == "(" for d in docs for f in d.frames):
+        return cmd, [], [], []
+    blanks = cuts + [d.body for d in docs]
+    removed, bodies, values, scripts = [], [], [], []
+    for d in docs:
+        body = cmd[d.body[0] : d.body[1]]
+        expands = d.unquoted and ("$" in body or "`" in body)
+        if expands:
+            scripts += _substitutions(body)
+        kinds = [f.kind for f in d.frames]
+        if kinds == ["top"]:
+            targets = _sink_targets(_words(cmd, d.frames[0], d.op[0], blanks))
+            if targets is None:
+                continue
+            bodies.append((targets, body))
+        elif kinds == ["top", '"', "$("] and _words(cmd, d.frames[2], d.op[0], blanks) == ["cat"]:
+            use = _subst_use(cmd, d, blanks)
+            if use != "message":
+                values.append(body.rstrip("\n"))
+            if use is None:
+                continue
+        else:
+            continue
+        if not expands:
+            removed.append(d.body)
+    out, pos = [], 0
+    for s, e in sorted(removed):
+        out.append(cmd[pos:s])
+        pos = e
+    out.append(cmd[pos:])
+    return "".join(out), bodies, values, scripts
 
 
 def segments(cmd, depth=0):
@@ -525,7 +1028,7 @@ def strip_wrappers(toks):
     i = 0
     while i < len(toks):
         t = toks[i]
-        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t):
+        if ASSIGNMENT.match(t):
             if t.startswith("CONCLAVE_"):
                 deny(
                     "destructive-command",
@@ -768,32 +1271,72 @@ def check_push(cwd, flags, positional):
         )
 
 
+HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def staged_pii_kinds(cwd, path, lines):
+    """pii kinds on the added lines of one staged file; lines are (line number, text).
+
+    A manifest is scanned whole from the index, so its contact fields are known, and only
+    hits on added lines count. Any other file, or a manifest git cannot show, is scanned
+    line by line.
+    """
+    if pii_exempt(path):
+        return []
+    if Path(path).name in CONTACT_MANIFESTS:
+        rc, blob = git(["cat-file", "blob", f":{path}"], cwd)
+        if rc == 0:
+            numbers = {n for n, _ in lines}
+            return [kind for kind, n in find_file_pii(path, blob, cwd) if n in numbers]
+    return [kind for _, text in lines for kind, _ in find_pii(text, cwd)]
+
+
+# Diff output in one shape whatever the user's config: no color or external driver, a/ and
+# b/ prefixes, raw paths. Run from the top of the work tree, diff.relative hides nothing.
+DIFF_FIXED = ["--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/"]
+
+
 def scan_staged(cwd, include_unstaged=False):
-    rc, names = git(["diff", "--cached", "--name-only"], cwd)
+    rc, top = git(["rev-parse", "--show-toplevel"], cwd)
+    if rc != 0:
+        return
+    cwd = top.rstrip("\n")
+    quote = ["-c", "core.quotePath=false"]
+    rc, names = git([*quote, "diff", "--cached", "--name-only", *DIFF_FIXED], cwd)
     if rc != 0:
         return
     listed = names.split()
     if include_unstaged:
-        listed += git(["diff", "--name-only"], cwd)[1].split()
+        listed += git([*quote, "diff", "--name-only", *DIFF_FIXED], cwd)[1].split()
     for n in listed:
         if is_secret_file(n):
             deny("commit-secret", f"`{n}` is a secret file; unstage it (`git reset -- {n}`) and add it to .gitignore.")
-    rc, diff = git(["diff", "--cached", "-U0"] + (["HEAD"] if include_unstaged else []), cwd)
+    rc, diff = git([*quote, "diff", "--cached", "-U0", *DIFF_FIXED] + (["HEAD"] if include_unstaged else []), cwd)
     if rc != 0:
         return
-    added = "\n".join(l[1:] for l in diff.splitlines() if l.startswith("+") and not l.startswith("+++"))
     current = ""
+    lineno = 0
+    in_header = False  # between `diff --git` and the first hunk, `+++ ` names the file
+    added = {}  # path -> [(line number in the staged file, text)]
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            in_header = True
+        elif in_header and line.startswith("+++ "):
+            current = line[6:] if line.startswith("+++ b/") else line[4:]
+        elif line.startswith("@@ "):
+            in_header = False
+            m = HUNK_HEADER.match(line)
+            lineno = int(m.group(1)) if m else 0
+        elif not in_header and line.startswith("+"):
+            added.setdefault(current, []).append((lineno, line[1:]))
+            lineno += 1
     report = []
     pii_report = []
-    for l in diff.splitlines():
-        if l.startswith("+++ "):
-            current = l[4:].replace("b/", "", 1)
-        elif l.startswith("+") and not l.startswith("+++"):
-            for name, _ in find_secrets(l[1:]):
-                report.append(f"{current} ({name})")
-            if not pii_exempt(current):
-                for kind, _ in find_pii(l[1:], cwd):
-                    pii_report.append(f"{current} ({kind})")
+    for path, lines in added.items():
+        for _, text in lines:
+            for name, _ in find_secrets(text):
+                report.append(f"{path} ({name})")
+        pii_report.extend(f"{path} ({kind})" for kind in staged_pii_kinds(cwd, path, lines))
     if report:
         deny(
             "commit-secret",
@@ -833,10 +1376,9 @@ def scan_add(cwd, args):
                         "commit-secret",
                         f"`{c}` contains a secret-looking value ({hits[0][0]}, line {hits[0][1]}); do not stage it.",
                     )
-                if not pii_exempt(c):
-                    phits = find_pii(text, cwd)
-                    if phits:
-                        deny_pii(f"`{c}`", phits)
+                phits = find_file_pii(c, text, cwd)
+                if phits:
+                    deny_pii(f"`{c}`", phits)
         except OSError:
             continue
 
@@ -1014,8 +1556,20 @@ def check_bash(data):
             "write-secret",
             f"the command contains a secret-looking value ({name}). Reference the secret through an environment variable the user set instead.",
         )
+    # A heredoc body read as text is prose, not filenames; it is still scanned whole for
+    # secrets (above) and, when it goes to a file, for pii like the Write tool's content.
+    # Commit and PR text from a heredoc is scanned by the git and gh checks below.
+    without_bodies, bodies, values, scripts = split_heredocs(cmd)
+    for text in (without_bodies, *scripts):
+        for _, toks in segments(text):
+            check_secret_tokens(toks)
+    check_secret_tokens(values)
+    for targets, body in bodies:
+        for target in targets:
+            phits = find_file_pii(target, body, data.get("cwd"))
+            if phits:
+                deny_pii(f"the heredoc text for `{Path(target).name}`", phits)
     for op, toks in segments(cmd):
-        check_secret_tokens(toks)
         check_outbound(op, toks)
         check_git(data, toks)
         check_gh(data, toks)
@@ -1056,8 +1610,8 @@ def check_write(data):
                 f"`{path}` is outside the project directory. Only the project, temp dirs and the scratchpad are writable.",
             )
     hits = find_secrets(content or "")
-    if not hits and not pii_exempt(path):
-        phits = find_pii(content or "", data.get("cwd"))
+    if not hits:
+        phits = find_file_pii(path, content or "", data.get("cwd"))
         if phits:
             deny_pii(f"the new text for `{Path(path).name}`", phits)
     if hits:

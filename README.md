@@ -197,7 +197,7 @@ with (`CONCLAVE_ALLOW=rule,rule`, `CONCLAVE_ALLOWED_HOSTS=host,host`,
 
 | Rule | Blocks |
 |---|---|
-| `read-secret-file` | Read, Grep, Glob, Edit, Write and shell access to `.env*`, keys, certificates, credential files, `~/.ssh`, `~/.aws`, `~/.config/gh` and the like (`.env.sample` and friends stay allowed) |
+| `read-secret-file` | Read, Grep, Glob, Edit, Write and shell access to `.env*`, keys, certificates, credential files, `~/.ssh`, `~/.aws`, `~/.config/gh` and the like (`.env.sample` and friends stay allowed); a heredoc body that `cat`, `tee`, `git commit -F -` or `gh --body-file -` takes as text is not read for filenames unless it is unquoted and holds a `$` or backtick, and a redirect target after it is still a path |
 | `write-secret` | Write/Edit content or a shell command carrying a private key, cloud, GitHub, Slack, Stripe, OpenAI/Anthropic, JWT or connection-string credential, or a real-looking `password=`/`token=` literal |
 | `commit-secret` | `git add` or `git commit` with a secret file or secret content staged |
 | `send-data-out` | request bodies, uploads, pipes into `curl`/`wget`, `scp`/`rsync`/`nc` to hosts outside localhost, private ranges and `CONCLAVE_ALLOWED_HOSTS`; any request carrying a literal credential |
@@ -207,7 +207,7 @@ with (`CONCLAVE_ALLOW=rule,rule`, `CONCLAVE_ALLOWED_HOSTS=host,host`,
 | `stay-in-project` | Write/Edit or a writing shell command outside the project directory (temp dirs, the scratchpad and `~/.claude` are allowed) |
 | `no-secret-in-output` | a subagent hand-back or a final message that contains a secret-looking value; the author is sent back to rewrite it |
 | `commit-approval` | nothing is blocked: `git commit`, `push`, `tag` and publishing `gh` commands (pr, issue, release, gist) from the main session always raise a permission prompt, even in auto mode; set `CONCLAVE_ALLOW=commit-approval` when you want the session to commit on its own |
-| `pii` | personal or identifiable information in written files, staged changes, commit messages, `gh` text or data sent out: email addresses, phone numbers, home-directory paths naming a user, card, IBAN or national id numbers, and this machine's own git name, git email and home path. Placeholders (`user@example.com`, `/home/user`, `noreply` addresses) pass; `LICENSE`, `AUTHORS`, `CODEOWNERS` and similar files are exempt; a public contact goes in `CONCLAVE_PII_ALLOW` |
+| `pii` | personal or identifiable information in written files, staged changes, commit messages, `gh` text or data sent out: email addresses, phone numbers, home-directory paths naming a user, card, IBAN or national id numbers, and this machine's own git name, git email and home path. Placeholders (`user@example.com`, `/home/user`, `noreply` addresses) pass; `LICENSE`, `AUTHORS`, `CODEOWNERS` and similar files are exempt, and so are the author, maintainer, contributor and owner fields of `plugin.json`, `marketplace.json`, `package.json`, `pyproject.toml` and `Cargo.toml` (an email or the git identity there is a public contact; any other personal data in those files still blocks); a public contact goes in `CONCLAVE_PII_ALLOW` |
 
 Tool results from Bash, Read and Grep are scanned too: secret-looking values are
 replaced with `[REDACTED <kind>]` before the model sees them. This is a tripwire against

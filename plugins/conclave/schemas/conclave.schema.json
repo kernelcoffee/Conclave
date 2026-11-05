@@ -78,6 +78,7 @@
               "enum": [
                 "python",
                 "fastapi",
+                "django",
                 "typescript",
                 "react",
                 "cpp",

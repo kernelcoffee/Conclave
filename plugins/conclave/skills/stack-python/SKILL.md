@@ -6,8 +6,9 @@ user-invocable: false
 # Python stack pack
 
 Applies to any Python 3.11+ code: services, CLIs, bots, workers, libraries. Framework
-specifics (FastAPI, SQLAlchemy, APScheduler) live in `stack-fastapi`; load both when the
-component lists both.
+specifics live in their own packs (`stack-fastapi` for FastAPI, SQLAlchemy and APScheduler;
+`stack-django` for Django and DRF); load the Python pack together with the framework pack
+the component lists.
 
 ## Idioms
 

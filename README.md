@@ -9,7 +9,7 @@ the team only when parallel builds or black-box verification earn it.
 The team is project-agnostic. Everything specific to a project (components, paths, check
 commands, stacks, stakes, threat model, docs, gates) lives in one profile file,
 `.claude/conclave.json`, that `/conclave:init` generates. Stack knowledge (Python,
-FastAPI, TypeScript, React, C++, Qt 6, Qt 5, Rust, Lua, shell) ships as skills the roles load on
+FastAPI, Django, TypeScript, React, C++, Qt 6, Qt 5, Rust, Lua, shell) ships as skills the roles load on
 demand, so adding a stack is one file.
 
 ## Install
@@ -233,6 +233,7 @@ and frozen contract tests are enforced mechanically, not by prose.
 |---|---|
 | `stack-python` | Typing, asyncio, exceptions, resources, pytest, ruff, mypy, pytest-cov |
 | `stack-fastapi` | Routers, dependencies, sessions and transactions, schemas, WebSockets, schedulers |
+| `stack-django` | Models and queries, migrations, forms and serializers, templates, auth and permissions, async views, tasks, pytest-django |
 | `stack-typescript` | Strictness, narrowing, async, API type fidelity, vitest, tsc, eslint |
 | `stack-react` | Hooks and effects, queries, state, rendering, forms, theme and layout, Playwright |
 | `stack-cpp` | Standard modern C++: const and initialisation discipline, ownership and RAII, strong types, warnings as errors, sanitizers, clang-tidy, ctest |

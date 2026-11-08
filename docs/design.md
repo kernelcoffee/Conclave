@@ -301,12 +301,33 @@ assistant text before it is shown, so the output rule works on hand-backs and fi
 messages, not on streaming text. Bash rules parse the command text (pipes, `&&`,
 `sh -c`, `git -C`), which is a tripwire, not a boundary.
 
-Two rules do not deny. `commit-approval` returns `permissionDecision: ask` for commit,
-push, tag and publishing `gh` commands from the main session, collected during the
-checks and emitted only when no other rule denied the same call; in a headless run the
-ask resolves to not approved. `pii` denies personal or identifiable values in what is
-written, staged, committed, published or sent, never in what is read or shown to the
-user in the session.
+Secret rules match a literal value, never a key name or a code expression. Known-prefix
+tokens match anywhere; a bare value after a credential key is a secret unless it is
+syntactically an expression (call, member path, index, environment lookup, template
+placeholder) or, in the code of a source file, a plain identifier. The text kind comes
+from where the text comes from, never its shape (`TextKind` in `guard.py`): source
+(language extension or interpreter shebang), config (env, ini, toml, yaml, json, shell,
+Dockerfile, systemd: lookups and placeholders only), data (the words of a Bash command),
+outbound (curl arguments, WebFetch URLs) and free (prose, documents, tool output). A key
+inside a string, docstring, template literal, raw string or comment of a source file
+(`source_inert_spans`) is data: only expressions and placeholders pass. Outside source
+text a member path or call with a random-looking name (`random_name`) is a literal, an
+operator after a value never makes it an expression, and in free and config text a value
+may sit on the next line (`loose_value`) and `=>` separates key and value. In a final
+message inline code and unlabelled or programming-language fences are source (`fence_kind`),
+fences labelled with a config or shell format take that kind (`hcl`, `nginx`, `xml`,
+`http`, `properties` and `dockerfile` among them), and `text`/`log`/`output`, `diff`,
+`patch` and unknown labels are free, as is a fence left open to the end. Secrets always
+deny, redact or refuse; they are never asked about.
+
+Two rules ask instead of denying. `commit-approval` returns `permissionDecision: ask` for
+commit, push, tag and publishing `gh` commands from the main session, collected during
+the checks and emitted only when no other rule denied the same call; in a headless run
+the ask resolves to not approved. `pii` guards personal or identifiable values in what
+is written, staged, committed, published or sent, never in what is read or shown to the
+user in the session: from the main session a hit asks, naming the kind and location but
+not the value, so the developer confirms the change is intended; from a subagent
+(`agent_id` set, which cannot carry the prompt) it denies, as `subagent-no-git` does.
 
 Rules and overrides are documented in the README; the rule names are stable because
 `CONCLAVE_ALLOW` refers to them. Adding a rule: a `check_*` function in `guard.py`, a

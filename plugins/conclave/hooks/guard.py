@@ -2,7 +2,8 @@
 """Conclave guardrails: ground rules the harness enforces on every tool call.
 
 Modes (first argument):
-  pre   PreToolUse   deny a call that breaks a rule (exit 2, reason on stderr)
+  pre   PreToolUse   deny a call that breaks a rule (exit 2, reason on stderr), or ask
+                     the user first (one permissionDecision ask, only when nothing denied)
   post  PostToolUse  redact secret-looking values from a tool result
   stop  Stop / SubagentStop  refuse a final message that contains a secret
 
@@ -12,7 +13,12 @@ Rules (names used in the deny reason and in CONCLAVE_ALLOW):
                        -F - or gh --body-file - read as a message, is text, not filenames,
                        unless it is unquoted and has a `$` or backtick for bash to expand;
                        a `-m` or `--body` value from `"$(cat <<'EOF' ...)"` is text too)
-  write-secret         secret-looking content in Write/Edit/Bash
+  write-secret         a secret literal in the text of a file tool or a Bash command: a
+                       quoted value after a credential key, or a bare one unless it is an
+                       expression (a call, a member path, an index, an environment lookup
+                       or a template placeholder; in a config file only the last two) or,
+                       in the code of a source file (not its strings or comments), a plain
+                       identifier; or a known-prefix token anywhere. Never a key name alone
   commit-secret        git add/commit of a secret file or secret content
   send-data-out        request bodies, uploads or literal credentials to hosts outside
                        the allowlist (localhost and private ranges, CONCLAVE_ALLOWED_HOSTS)
@@ -23,7 +29,7 @@ Rules (names used in the deny reason and in CONCLAVE_ALLOW):
                        global installs, global git config, home config edits, pipe to shell
   stay-in-project      Write/Edit or a writing Bash command outside the project directory
                        (temp dirs, the scratchpad and ~/.claude are allowed)
-  no-secret-in-output  a final message that contains a secret-looking value
+  no-secret-in-output  a final message that contains a secret literal or known-prefix token
   commit-approval      git commit/push/tag and gh pr/release from the main session always
                        ask the user first (a permission prompt); allow it with
                        CONCLAVE_ALLOW=commit-approval when the user said so
@@ -33,7 +39,10 @@ Rules (names used in the deny reason and in CONCLAVE_ALLOW):
                        staged changes, commit or PR text, or data sent out; in the author,
                        maintainer, contributor and owner fields of plugin.json,
                        marketplace.json, package.json, pyproject.toml and Cargo.toml an
-                       email or the git identity is a public contact
+                       email or the git identity is a public contact. A hit asks the user
+                       from the main session (permissionDecision ask) and denies from a
+                       subagent (agent_id set), which cannot carry the prompt;
+                       CONCLAVE_ALLOW=pii skips both
 
 Overrides come from the environment Claude Code was started with, never from the command
 line (an inline CONCLAVE_* assignment is itself denied):
@@ -41,10 +50,11 @@ line (an inline CONCLAVE_* assignment is itself denied):
   CONCLAVE_ALLOWED_HOSTS=a.com,b.org   extra hosts data may be sent to
   CONCLAVE_PII_ALLOW=you@your.org,Your Name      values the pii rule accepts (a public contact)
 
-A deny reason never contains the matched value. This is a tripwire against mistakes, not a
+A deny or ask reason never contains the matched value. This is a tripwire against mistakes, not a
 security boundary: a command can always be written in a way the parser does not see.
 """
 
+import bisect
 import fnmatch
 import json
 import math
@@ -53,6 +63,9 @@ import re
 import shlex
 import subprocess
 import sys
+from collections.abc import Callable
+from enum import StrEnum
+from functools import cached_property
 from pathlib import Path
 
 # ---- configuration -----------------------------------------------------------
@@ -138,6 +151,13 @@ SYSTEM_DIRS = [
     "/sys",
 ]
 
+# The key words of a credential assignment; a text without one cannot match it.
+CREDENTIAL_KEYS = (
+    r"password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret"
+    r"|auth[_-]?token|secret[_-]?key|encryption[_-]?key|signing[_-]?key"
+)
+CREDENTIAL_KEY = re.compile(rf"(?i)\b(?:{CREDENTIAL_KEYS})\b")
+
 # (name, compiled regex). Specific token formats first; the generic assignment rule is
 # filtered by length, entropy and placeholder words to keep test fixtures out.
 SECRET_PATTERNS = [
@@ -168,9 +188,17 @@ SECRET_PATTERNS = [
     ("basic auth in URL", re.compile(r"(?i)\bhttps?://[^:/\s'\"@]+:(?P<value>[^@/\s'\"]{4,})@[^\s'\"]+")),
     ("bearer token", re.compile(r"(?i)\bbearer\s+(?P<value>[A-Za-z0-9._~+/=-]{20,})")),
     (
+        # key and separator on one line (`=`, `:`, `:=` or `=>`, never `==` or `:==`); the
+        # value on that line, or as the first word of a later line after blank lines when
+        # it is quoted or a single word (no `:`, `=` only as base64 padding) that no
+        # separator follows. credential_literal takes a value on a later line only in the
+        # forms each text kind allows (loose_value).
         "credential assignment",
         re.compile(
-            r"(?i)\b(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|auth[_-]?token|secret[_-]?key|encryption[_-]?key|signing[_-]?key)\b\s*[:=]\s*['\"]?(?P<value>[^\s'\"`,;]{8,})"
+            rf"(?i)\b(?P<key>{CREDENTIAL_KEYS})\b"
+            r"[ \t]*(?P<sep>:=|=>|[:=])(?![=>])[ \t]*"
+            r"(?:(?:\r?\n[ \t]*)*?\r?\n[ \t]*(?=['\"`]|[^\s'\"`,;:=]{8,}={0,3}(?!\S)(?![ \t]*[:=])))?"
+            r"['\"`]?(?P<value>[^\s'\"`,;]{8,})"
         ),
     ),
 ]
@@ -372,8 +400,10 @@ def find_pii(text, cwd=None, public=()):
     for m in EMAIL.finditer(text):
         local, domain = m.group(1), m.group(2)
         token_start = max(text.rfind(c, 0, m.start()) for c in " \t\n'\"`<>()[]") + 1
-        if "://" in text[token_start:m.start()]:
-            continue  # userinfo in a URL (scheme://user:pass@host), not an address
+        between = text[token_start : m.start()]
+        scheme_end = between.find("://")
+        if scheme_end >= 0 and not re.search(r"[/?#]", between[scheme_end + 3 :]):
+            continue  # userinfo in a URL (scheme://user:pass@host), not an address; a query is not
         if m.group(0).lower() in PII_ALLOW or SAFE_EMAIL_DOMAINS.search(domain) or SAFE_EMAIL_LOCAL.match(local):
             continue
         if domain.lower() in ("anthropic.com",) and local.lower().startswith("noreply"):
@@ -413,26 +443,64 @@ def find_pii(text, cwd=None, public=()):
     return hits
 
 
-def deny_pii(where, hits):
+PII_PLACEHOLDER = "a placeholder (user@example.com, /home/user, ~/...) or a relative path"
+
+
+def pii_detail(where: str, hits: list[tuple[str, int]]) -> str:
+    """One finding of the pii rule: the place and the kinds, never a value."""
     kinds = ", ".join(sorted({k for k, _ in hits}))
-    first = hits[0][1]
-    deny(
-        "pii",
-        f"{where} contains personal or identifiable information ({kinds}; first at line {first}). Use a placeholder "
-        "(user@example.com, /home/user, ~/...) or a relative path. If it is a public contact the user wants, they add "
-        "it to CONCLAVE_PII_ALLOW.",
-    )
+    first = min(line for _, line in hits)
+    return f"{where} contains personal or identifiable information ({kinds}; first at line {first})."
 
 
-# Commit approval: collected during the checks, emitted as an "ask" only if no rule denied.
-PENDING_ASK = []
+def listing(entries: list[str], cap: int = 5) -> str:
+    """Up to cap distinct entries, sorted, and how many more there are."""
+    items = sorted(set(entries))
+    more = f" and {len(items) - cap} more" if len(items) > cap else ""
+    return ", ".join(items[:cap]) + more
+
+
+def is_subagent(data: dict) -> bool:
+    """True for a call from a subagent. agent_id is set only there; agent_type alone is also
+    sent from the main thread of a session started with an agent (`--agent`, or a plugin's
+    settings.json), so it does not tell the two apart."""
+    return bool(data.get("agent_id"))
+
+
+def report_pii(data: dict, finding: str) -> None:
+    """pii asks the user from the main session and denies from a subagent, which cannot carry
+    the prompt to the user. The ask is only collected here: mode_pre emits it at the end, so
+    any rule that denies the same call wins."""
+    if is_subagent(data):
+        deny(
+            "pii",
+            f"{finding} A subagent cannot confirm this: replace it with {PII_PLACEHOLDER}, or stop and hand it "
+            "back so the main session makes the change and the user is asked.",
+        )
+        return
+    if skipped("pii", finding):
+        return
+    PENDING_PII.append(finding)
+
+
+# Asks, collected during the checks and emitted as one "ask" only if no rule denied:
+# commit-approval actions and pii findings from the main session.
+PENDING_ASK: list[str] = []
+PENDING_PII: list[str] = []
 TEMP_PREFIXES = ["/tmp", "/var/tmp", "/dev/shm"]
 
 
 # ---- helpers -----------------------------------------------------------------
-def deny(rule, detail):
+def skipped(rule: str, detail: str) -> bool:
+    """True when CONCLAVE_ALLOW skips rule; says so on stderr with the detail."""
     if rule in ALLOW or "all" in ALLOW:
         print(f"Conclave guardrail [{rule}] skipped by CONCLAVE_ALLOW: {detail}", file=sys.stderr)
+        return True
+    return False
+
+
+def deny(rule, detail):
+    if skipped(rule, detail):
         return
     print(
         f"Conclave guardrail [{rule}]: {detail} Do not work around this; if the action is right, tell the user and let them do it.",
@@ -464,34 +532,565 @@ def looks_real(value):
     return classes >= 2
 
 
-def find_secrets(text):
-    """Return [(pattern name, line number)] for secret-looking values in text."""
-    hits = []
+# The credential assignment pattern fires on a literal only, never on a key name alone. A
+# value in quotes is a literal. A bare value that passes looks_real is a literal unless
+#   (a) it is an expression by its syntax: a call `name(...)`, a member path `a.b.c`, an
+#       index `a[...]`, an environment lookup or a template placeholder; outside source
+#       text a name in a call or member path that looks random is not code (random_name);
+#   (b) it is a plain identifier and the text is source code.
+# What a text is (TextKind) comes from where it comes from, never from its shape: the file a
+# tool writes or a command shows, the place of a command word, a message channel. Source
+# text takes (a) and (b), config text only the lookups and placeholders of (a), every other
+# kind all of (a) and nothing else. In source text a key inside a string or a comment is
+# data (source_inert_spans).
+CONFIG_SUFFIXES = {
+    ".env", ".ini", ".cfg", ".conf", ".cnf", ".properties", ".toml", ".tfvars", ".yaml", ".yml", ".json",
+    ".jsonc", ".sh", ".bash", ".zsh", ".ksh", ".ps1", ".psm1", ".bat", ".cmd", ".mk", ".dockerfile",
+    ".containerfile", ".service", ".socket", ".timer",
+}
+CONFIG_NAMES = {
+    ".env", ".envrc", ".npmrc", ".pypirc", ".netrc", ".pgpass", ".yarnrc", ".gemrc", "environ",
+    ".bashrc", ".zshrc", ".profile", ".bash_profile", "dockerfile", "containerfile", "makefile", "gnumakefile",
+}
+CONFIG_NAME_PREFIXES = (".env.", "dockerfile.", "containerfile.")
+SOURCE_SUFFIXES = {
+    ".py", ".pyi", ".pyw", ".ipynb", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx", ".vue",
+    ".svelte", ".java", ".kt", ".kts", ".scala", ".groovy", ".gradle", ".go", ".rs", ".c", ".h", ".cc",
+    ".cpp", ".cxx", ".hh", ".hpp", ".hxx", ".m", ".mm", ".swift", ".cs", ".fs", ".vb", ".rb", ".php",
+    ".pl", ".pm", ".lua", ".r", ".jl", ".dart", ".ex", ".exs", ".erl", ".hrl", ".clj", ".cljs", ".hs",
+    ".ml", ".mli", ".elm", ".zig", ".nim", ".sol", ".qml",
+}
+# A template or copy of a file is read as the file: app.ini.example, settings.py.in.
+TEMPLATE_SUFFIXES = {".example", ".sample", ".template", ".tmpl", ".tpl", ".dist", ".default", ".in", ".orig", ".bak"}
+# The interpreter a `#!` line names, behind `env` and its options when it is env.
+SHEBANG = re.compile(r"#![ \t]*(?:\S*/)?(?:env[ \t]+(?:-\S*[ \t]+)*)?(?P<prog>[^\s/]+)")
+SHEBANG_SOURCE = re.compile(
+    r"(?:python|pypy|node|nodejs|deno|bun|ts-node|tsx|ruby|perl|php|lua|luajit|rscript|julia|groovy|"
+    r"kotlin|scala|swift|elixir|escript|dart)[\d.]*",
+    re.I,
+)
+# Template placeholders looks_real does not already skip: `%{name}`, a format or interpolation
+# field `{name}` or `#{name}`, tox `{env:NAME}`, Concourse `((name))`, Maven `@name@`.
+PLACEHOLDER_FORM = re.compile(r"%\{[^{}\s]+\}|#?\{[A-Za-z_][^{}\s]*\}|\(\([\w.:-]+\)\)|@[A-Za-z_][\w.-]*@", re.A)
+# An identifier, and the link to the next one in a member path: `.`, `?.`, `!.`, `!!.`, `->`,
+# `::`, with `#` for a JavaScript private field. `$` is a name character in JavaScript and PHP.
+NAME = re.compile(r"[A-Za-z_$][\w$]*", re.A)
+MEMBER_LINK = re.compile(r"(?:\.|\?\.|!!?\.|->|::)#?(?P<name>[A-Za-z_$][\w$]*)", re.A)
+# The parts of a name: a word (`Client`, `client`), an acronym, digits, punctuation. A name
+# of 12 or more characters with one or two letter parts in a fifth of it or more is
+# random, not a word chain: `Hq7Lm2Pz9Rt4Kw8Vb`, base64, but not `oauth2ClientSecretV3`.
+NAME_PART = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+|[^A-Za-z\d]+", re.A)
+RANDOM_NAME_MIN = 12
+BRACKETS = {"(": ")", "[": "]", "{": "}"}
+# What may end an expression: a non-null mark, then closers of the call it is an argument of.
+EXPRESSION_TAIL = re.compile(r"[!?]{0,2}[)\]};]*")
+# (b): a plain identifier, in source text also a type name with generic arguments, an array or
+# nullable mark, a union, a reference, and the closers of a call it is an argument of.
+# Possessive quantifiers keep the match linear on a long value.
+TYPE_NAME = r"[A-Za-z_]\w*+(?:<[\w<>\[\].:?]*+)?[!?]?"
+SOURCE_NAME = re.compile(rf"[&*]{{0,2}}{TYPE_NAME}(?:\|{TYPE_NAME})*+[)\]}}>]*+", re.A)
+# A single English word: what starts a sentence on the line after `password:`, not a value.
+PROSE_WORD = re.compile(r"[A-Z]?[a-z]+(?:-[A-Za-z]?[a-z]+)*[.!?]?|[A-Z]+")
+# What may follow a value alone on a later line: a comment.
+VALUE_LINE_TAIL = re.compile(r"[ \t]*(?:[ \t]#[^\n]*)?\r?")
+# A fenced block in prose, the kind its info string names (fence_kind), and an inline code span.
+FENCE = re.compile(r"(?m)^[ \t]{0,3}(?P<mark>`{3,}|~{3,})[ \t]*(?P<info>[^\n]*)$")
+FENCE_LANG = re.compile(r"[\w+-]+")
+CODE_RUN = re.compile(r"`+|\n")
+# A diff file header (`--- a/app.ini` then `+++ b/app.py`, or `+++` alone), a run of removed
+# lines, and the first line after the header that is not part of a hunk (`diff --git`,
+# `commit`, a blank line); a head or tail header (`==> app.py <==`); a grep location
+# (`src/app.py:3:`, `src/app.py-3-`, `src/app.py:`).
+DIFF_HEADER = re.compile(r"(?m)^(?:--- (?:a/)?(?P<old>\S+)[^\n]*\n)?\+\+\+ (?:b/)?(?P<path>\S+)[^\n]*$")
+REMOVED_RUN = re.compile(r"(?m)(?:^-[^\n]*(?:\n|\Z))+")
+HUNK_END = re.compile(r"(?m)^(?![ +\-@\\])")
+HEAD_HEADER = re.compile(r"(?m)^==> (?P<path>[^\n]+?) <==[ \t]*$")
+GREP_LOCATION = re.compile(r"(?m)^(?P<path>[^\s:]+?(?=:\d+[:-])|[^\s:]+?\.\w+(?=:|-\d+-))", re.A)
+# What may open a string or a comment in source text (source_inert_spans): a triple quote
+# (Python, Kotlin, Scala, Swift, C# raw), a Rust raw string `r#"`, a C# verbatim `@"`, a
+# backtick (JavaScript template, Go raw string), a quote, `//`, `/*`, `<!--`, `#`, `--`, `;`,
+# a backslash that escapes the next character, and a newline.
+SOURCE_EVENT = re.compile(r"\"\"\"|'''|(?<![\w$])b?r#+\"|(?<![\w$])\$?@\$?\"|[`\"'#;\n\\]|//|/\*|<!--|--", re.A)
+STRING_PREFIX_CHARS = "rRbBuUfF"
+STRING_CLOSE = {
+    '"': re.compile(r'\\.|"|\n', re.S),
+    "'": re.compile(r"\\.|'|\n", re.S),
+    "`": re.compile(r"\\.|`", re.S),
+    '"""': re.compile(r'\\.|"""', re.S),
+    "'''": re.compile(r"\\.|'''", re.S),
+}
+VERBATIM_CLOSE = re.compile(r'""|"')
+INDENT = re.compile(r"[ \t]*")
+
+
+class TextKind(StrEnum):
+    """Where a scanned text comes from, which decides how a bare credential value is read."""
+
+    SOURCE = "source"  # a code file: (a) and (b)
+    CONFIG = "config"  # env, ini, toml, yaml, json, properties, shell, Dockerfile: lookups and placeholders
+    FREE = "free"  # prose, a document, a final message, tool output: (a)
+    DATA = "data"  # a Bash command, its words and arguments: (a)
+    OUTBOUND = "outbound"  # a URL or a request argument that leaves the machine: (a)
+
+
+# Kinds where a value on a later line than its key may be a first word followed by more
+# text, or sit at the start of the line (loose_value).
+LOOSE_LINE_KINDS = {TextKind.FREE, TextKind.CONFIG}
+# The kind of a fenced block by its label: source for a programming language, config, data
+# for a shell, free for prose, a diff and any label not listed (fence_kind).
+FENCE_KINDS = {
+    **dict.fromkeys(
+        ("python", "py", "python3", "py3", "ipython", "pycon", "javascript", "js", "jsx", "mjs", "cjs", "typescript",
+         "ts", "tsx", "rust", "rs", "go", "golang", "java", "kotlin", "kt", "kts", "swift", "c", "h", "cpp", "c++",
+         "cc", "cxx", "hpp", "objc", "objective-c", "objectivec", "cs", "csharp", "fsharp", "fs", "vb", "vbnet",
+         "rb", "ruby", "php", "lua", "scala", "dart", "elixir", "ex", "exs", "erlang", "erl", "haskell", "hs",
+         "sql", "perl", "pl", "r", "julia", "jl", "clojure", "clj", "cljs", "groovy", "gradle", "ocaml", "ml",
+         "elm", "zig", "nim", "solidity", "sol", "vue", "svelte", "qml"),
+        TextKind.SOURCE,
+    ),
+    **dict.fromkeys(
+        ("yaml", "yml", "json", "jsonc", "json5", "ini", "cfg", "conf", "cnf", "properties", "toml", "env", "dotenv",
+         "dockerfile", "docker", "makefile", "make", "systemd", "hcl", "tf", "terraform", "tfvars", "nginx",
+         "apache", "apacheconf", "ssh-config", "sshconfig", "gitconfig", "xml", "csv", "tsv", "http"),
+        TextKind.CONFIG,
+    ),
+    **dict.fromkeys(
+        ("sh", "bash", "zsh", "ksh", "shell", "console", "shell-session", "powershell", "ps1", "bat", "cmd"),
+        TextKind.DATA,
+    ),
+    **dict.fromkeys(
+        ("text", "txt", "plain", "plaintext", "markdown", "md", "log", "output", "none", "diff", "patch", "udiff"),
+        TextKind.FREE,
+    ),
+}
+
+Region = tuple[int, int, TextKind]
+Layout = Callable[[str], list[Region]]
+
+
+def path_kind(path: str | os.PathLike[str]) -> TextKind | None:
+    """The kind the name of a file gives its content, or None when the name does not say."""
+    name = Path(str(path)).name.lower()
+    while Path(name).suffix in TEMPLATE_SUFFIXES:
+        name = Path(name).stem
+    suffix = Path(name).suffix
+    if (
+        suffix in CONFIG_SUFFIXES
+        or name in CONFIG_NAMES
+        or name.startswith(CONFIG_NAME_PREFIXES)
+        or ".env." in name
+    ):
+        return TextKind.CONFIG
+    return TextKind.SOURCE if suffix in SOURCE_SUFFIXES else None
+
+
+def shebang_kind(first_line: str) -> TextKind | None:
+    """The kind a `#!` line gives a script: source for a language interpreter, config for a
+    shell, None otherwise."""
+    m = SHEBANG.match(first_line)
+    if m is None:
+        return None
+    prog = m.group("prog")
+    if prog in SHELLS:
+        return TextKind.CONFIG
+    return TextKind.SOURCE if SHEBANG_SOURCE.fullmatch(prog) else None
+
+
+def text_kind(path: str | os.PathLike[str], text: str = "") -> TextKind:
+    """The kind of text, the content of the file at path: by its name, else by its `#!` line,
+    else free text."""
+    return path_kind(path) or shebang_kind(text.split("\n", 1)[0]) or TextKind.FREE
+
+
+def closing(value: str, i: int) -> int | None:
+    """The offset of the bracket that closes the one at i; None when value ends first (the
+    pattern cut it at a space, a quote or a comma) or -1 when a bracket closes out of turn."""
+    stack = []
+    for k in range(i, len(value)):
+        c = value[k]
+        if c in BRACKETS:
+            stack.append(BRACKETS[c])
+        elif c in ")]}":
+            if c != stack.pop():
+                return -1
+            if not stack:
+                return k
+    return None
+
+
+def random_name(name: str) -> bool:
+    """True when a name looks random rather than a chain of words: 12 or more characters,
+    a fifth of them or more in parts of one or two letters (NAME_PART)."""
+    if len(name) < RANDOM_NAME_MIN:
+        return False
+    short = sum(1 for part in NAME_PART.findall(name) if part[0].isalpha() and len(part) <= 2)
+    return short * 5 >= len(name)
+
+
+def code_expression(value: str, names_checked: bool = False) -> bool:
+    """(a) on a bare value: a call, a member path or an index. A reference or dereference
+    mark may come first (&cfg.token), a non-null mark and the closers of an enclosing call
+    last. With names_checked, a name of the path that looks random (random_name) makes it
+    a dotted token, not code. Placeholders are tested by credential_literal."""
+    v = value.lstrip("&*")
+    if len(value) - len(v) > 2:
+        return False
+    m = NAME.match(v)
+    if m is None or (names_checked and random_name(m.group())):
+        return False
+    i, shaped = m.end(), False
+    while i < len(v):
+        link = MEMBER_LINK.match(v, i)
+        if link:
+            if names_checked and random_name(link.group("name")):
+                return False
+            i, shaped = link.end(), True
+            continue
+        j = i + (v[i] == "!")  # a macro call: env!(...)
+        if j < len(v) and v[j] in "([":
+            end = closing(v, j)
+            if end is None:
+                return True  # the value stops inside the arguments
+            if end < 0:
+                return False
+            i, shaped = end + 1, True
+            continue
+        break
+    return shaped and EXPRESSION_TAIL.fullmatch(v, i) is not None
+
+
+def code_spans(text: str, start: int, end: int) -> list[Region]:
+    """The inline code spans between start and end: a run of backticks to the next run of the
+    same length on its line."""
+    spans: list[Region] = []
+    opened: re.Match[str] | None = None
+    for run in CODE_RUN.finditer(text, start, end):
+        if run.group() == "\n":
+            opened = None
+        elif opened is None:
+            opened = run
+        elif len(run.group()) == len(opened.group()):
+            spans.append((opened.end(), run.start(), TextKind.SOURCE))
+            opened = None
+    return spans
+
+
+def fence_kind(info: str) -> TextKind:
+    """The kind of a fenced block by its info string: source with no label, else the kind
+    FENCE_KINDS gives its first word, free text for a label it does not list."""
+    if not info:
+        return TextKind.SOURCE
+    lang = FENCE_LANG.match(info)
+    return FENCE_KINDS.get(lang.group().lower(), TextKind.FREE) if lang else TextKind.FREE
+
+
+def markdown_layout(text: str) -> list[Region]:
+    """A final message: a fenced block has the kind of its label (fence_kind), a fence left
+    open is free text to the end, an inline code span is source, the rest is free text."""
+    fences: list[Region] = []
+    opened: tuple[str, int, int, TextKind] | None = None
+    for f in FENCE.finditer(text):
+        mark, info = f.group("mark"), f.group("info").strip()
+        if opened is None:
+            opened = (mark[0], len(mark), f.end(), fence_kind(info))
+        elif mark[0] == opened[0] and len(mark) >= opened[1] and not info:
+            fences.append((opened[2], f.start(), opened[3]))
+            opened = None
+    if opened is not None:
+        fences.append((opened[2], len(text), TextKind.FREE))
+    regions: list[Region] = []
+    pos = 0
+    for fence in fences:
+        regions += code_spans(text, pos, fence[0])
+        regions.append(fence)
+        pos = fence[1]
+    return regions + code_spans(text, pos, len(text))
+
+
+def diff_layout(text: str) -> list[Region]:
+    """Diff or patch output: the hunk lines under a `+++` header have the kind of the file it
+    names, its removed (`-`) lines the kind of the file the `---` line before it names; any
+    other line (the next file's `diff --git`, a commit header in git log -p) ends them."""
+    headers = list(DIFF_HEADER.finditer(text))
+    regions: list[Region] = []
+    for k, h in enumerate(headers):
+        limit = headers[k + 1].start() if k + 1 < len(headers) else len(text)
+        hunk_end = HUNK_END.search(text, h.end() + 1, limit)
+        stop = hunk_end.start() if hunk_end else limit
+        new = text_kind(h.group("path"))
+        old = text_kind(h.group("old")) if h.group("old") else new
+        pos = h.end()
+        if old is not new:
+            for run in REMOVED_RUN.finditer(text, pos, stop):
+                if run.start() > pos:
+                    regions.append((pos, run.start(), new))
+                regions.append((run.start(), run.end(), old))
+                pos = run.end()
+        if pos < stop:
+            regions.append((pos, stop, new))
+    return regions
+
+
+def head_layout(text: str) -> list[Region]:
+    """head or tail output over several files: the lines under `==> f <==` have f's kind."""
+    headers = list(HEAD_HEADER.finditer(text))
+    return [
+        (h.end(), headers[k + 1].start() if k + 1 < len(headers) else len(text), text_kind(h.group("path")))
+        for k, h in enumerate(headers)
+    ]
+
+
+def grep_layout(text: str) -> list[Region]:
+    """grep output: a line whose location names a file has that file's kind after it."""
+    regions: list[Region] = []
+    for loc in GREP_LOCATION.finditer(text):
+        end = text.find("\n", loc.end())
+        regions.append((loc.end(), len(text) if end < 0 else end, text_kind(loc.group("path"))))
+    return regions
+
+
+def opens_string(text: str, line: int, i: int) -> bool:
+    """True when the quote at i opens a string: it starts its line or follows a character
+    that is not part of a word, or a string prefix (f'', rb""). An apostrophe inside a
+    word (don't) opens nothing."""
+    j = i - 1
+    while j >= line and i - j <= 2 and text[j] in STRING_PREFIX_CHARS:
+        j -= 1
+    return j < line or not (text[j].isalnum() or text[j] == "_")
+
+
+def string_end(text: str, opener: str, start: int, end: int) -> tuple[int, int]:
+    """(end of the content, end of the closing quote) of the string whose opener ends at
+    start: a backslash escapes the next character; a one-quote string left open ends with
+    its line, any other with the text."""
+    close = STRING_CLOSE[opener]
+    k = start
+    while (c := close.search(text, k, end)) is not None:
+        if c.group()[0] == "\\":
+            k = c.end()
+        elif c.group() == "\n":
+            return c.start(), c.start()
+        else:
+            return c.start(), c.end()
+    return end, end
+
+
+def inert_end(text: str, e: re.Match[str], line: int, indent_end: int, end: int) -> tuple[int, int] | None:
+    """(end of the content, where code resumes) of the string or comment SOURCE_EVENT found
+    at e, on the line that starts at line and whose indentation ends at indent_end; None
+    when e opens neither. A comment runs to the end of its line, a block comment to its
+    closer; one left open, like a multi-line string, runs to the end of the text."""
+    tok, i, after = e.group(), e.start(), e.end()
+    nxt = text[after : min(after + 1, end)]
+    if tok in ('"', "'"):
+        return string_end(text, tok, after, end) if opens_string(text, line, i) else None
+    if tok in STRING_CLOSE:
+        return string_end(text, tok, after, end)
+    if tok.endswith('"'):
+        if "#" in tok:  # Rust r#"..."#: no escapes, closed by a quote and as many #
+            closer = '"' + "#" * tok.count("#")
+            k = text.find(closer, after, end)
+            return (end, end) if k < 0 else (k, k + len(closer))
+        k = after  # C# @"...": no escapes, "" is a quote
+        while (c := VERBATIM_CLOSE.search(text, k, end)) is not None:
+            if c.group() == '"':
+                return c.start(), c.end()
+            k = c.end()
+        return end, end
+    if tok in ("/*", "<!--"):
+        closer = "*/" if tok == "/*" else "-->"
+        k = text.find(closer, after, end)
+        return (end, end) if k < 0 else (k, k + len(closer))
+    blank_after = nxt in ("", "\n", "\r", " ", "\t")
+    comment = (
+        tok == "//"
+        or (tok == "#" and (blank_after or nxt in ("#", ":") or (i == line and text.startswith("!/", after, end))))
+        or (tok == "--" and (i == line or text[i - 1] in " \t") and (blank_after or text.startswith("[[", after, end)))
+        or (tok == ";" and i == indent_end and (blank_after or nxt == ";"))
+    )
+    if not comment:
+        return None
+    k = text.find("\n", after, end)
+    return (end, end) if k < 0 else (k, k)
+
+
+def source_inert_spans(text: str, start: int, end: int) -> tuple[list[int], list[int]]:
+    """The (starts, ends) of the contents of the strings and comments of the source text
+    text[start:end], in one pass: quoted strings, triple-quoted strings (Python, Kotlin,
+    Scala, Swift, C# raw), backtick strings (JavaScript and TypeScript templates, Go raw
+    strings), Rust raw strings, C# verbatim strings; `//`, `#`, `--` and `;` line comments
+    and `/* */` and `<!-- -->` block comments. Only a `#` before a blank, `#`, `:` or a
+    shebang path, a `--` between blanks and a `;` that starts its line open a comment, so
+    a JavaScript private field, a decrement or a statement end does not."""
+    starts: list[int] = []
+    ends: list[int] = []
+    line = pos = start
+    indent_end = INDENT.match(text, line, end).end()
+    while (e := SOURCE_EVENT.search(text, pos, end)) is not None:
+        tok = e.group()
+        if tok == "\n" or (tok == "\\" and text.startswith("\n", e.end(), end)):
+            line = pos = text.index("\n", e.start()) + 1
+            indent_end = INDENT.match(text, line, end).end()
+            continue
+        if tok == "\\":
+            pos = e.end() + 1
+            continue
+        span = inert_end(text, e, line, indent_end, end)
+        if span is None:
+            pos = e.end()
+            continue
+        starts.append(e.end())
+        ends.append(span[0])
+        pos = span[1]
+        newline = text.rfind("\n", e.end(), pos)
+        if newline >= 0:
+            line = newline + 1
+            indent_end = INDENT.match(text, line, end).end()
+    return starts, ends
+
+
+class Scan:
+    """One text being scanned for secrets: its kind, and the regions (fenced blocks, code
+    spans, the files a diff, head or grep shows) a layout gives a kind of their own. Lines,
+    regions and the strings and comments of source text are read once, when a match first
+    needs them."""
+
+    def __init__(self, text: str, kind: TextKind, layout: Layout | None = None) -> None:
+        self.text = text
+        self.kind = kind
+        self.layout = layout
+        self._inert: dict[tuple[int, int], tuple[list[int], list[int]]] = {}
+
+    @cached_property
+    def newlines(self) -> list[int]:
+        return [m.start() for m in re.finditer("\n", self.text)]
+
+    @cached_property
+    def regions(self) -> tuple[list[int], list[Region]]:
+        regions = self.layout(self.text) if self.layout else []
+        return [r[0] for r in regions], regions
+
+    def line_start(self, pos: int) -> int:
+        i = bisect.bisect_left(self.newlines, pos)
+        return self.newlines[i - 1] + 1 if i else 0
+
+    def line_end(self, pos: int) -> int:
+        i = bisect.bisect_left(self.newlines, pos)
+        return self.newlines[i] if i < len(self.newlines) else len(self.text)
+
+    def kind_at(self, pos: int) -> TextKind:
+        starts, regions = self.regions
+        i = bisect.bisect_right(starts, pos) - 1
+        return regions[i][2] if i >= 0 and pos < regions[i][1] else self.kind
+
+    def segment(self, pos: int) -> tuple[int, int]:
+        """The region holding pos, or the stretch between two regions."""
+        starts, regions = self.regions
+        i = bisect.bisect_right(starts, pos) - 1
+        if i >= 0 and pos < regions[i][1]:
+            return regions[i][0], regions[i][1]
+        return (regions[i][1] if i >= 0 else 0), (starts[i + 1] if i + 1 < len(starts) else len(self.text))
+
+    def inert(self, pos: int) -> bool:
+        """True when pos sits inside a string or a comment of the source text around it."""
+        seg = self.segment(pos)
+        if seg not in self._inert:
+            self._inert[seg] = source_inert_spans(self.text, *seg)
+        starts, ends = self._inert[seg]
+        i = bisect.bisect_right(starts, pos) - 1
+        return i >= 0 and pos < ends[i]
+
+    def kind_of_key(self, pos: int) -> TextKind:
+        """The kind of the text at a key; in source text, data inside a string or a comment
+        (a connection string, a pasted fixture, a docstring, a note)."""
+        kind = self.kind_at(pos)
+        return TextKind.DATA if kind is TextKind.SOURCE and self.inert(pos) else kind
+
+
+def loose_value(m: re.Match[str], scan: Scan) -> bool:
+    """True when the value of a credential assignment match sits on a later line than its key
+    and that line is not indented, or holds more than the value and a comment: a form only
+    free and config text take (LOOSE_LINE_KINDS)."""
+    text, start = scan.text, m.start("value")
+    if text.find("\n", m.end("sep"), start) < 0:
+        return False
+    line = scan.line_start(start)
+    quoted = start > line and text[start - 1] in "'\"`"
+    alone = quoted or VALUE_LINE_TAIL.fullmatch(text, m.end("value"), scan.line_end(start)) is not None
+    return not (text[line] in " \t" and alone)
+
+
+def credential_literal(m: re.Match[str], scan: Scan) -> bool:
+    """True when the value of a credential assignment match is a literal: quoted, or bare and
+    neither (a) nor (b) for the kind of the text at its key. Never reports the value."""
+    text, value, start = scan.text, m.group("value"), m.start("value")
+    before = text[start - 1] if start else ""
+    kind = scan.kind_of_key(m.start("key"))
+    if loose_value(m, scan) and (kind not in LOOSE_LINE_KINDS or PROSE_WORD.fullmatch(value)):
+        return False  # the next statement or command in code and in a shell, a sentence in prose
+    if before in ("'", '"'):
+        return True
+    if PLACEHOLDER_FORM.fullmatch(value):
+        return False
+    if kind is TextKind.CONFIG:
+        return True
+    if code_expression(value, names_checked=kind is not TextKind.SOURCE):
+        return False
+    # a backtick opens a template string in code and a code span or substitution elsewhere:
+    # only an expression inside it is not a literal
+    return before == "`" or kind is not TextKind.SOURCE or SOURCE_NAME.fullmatch(value) is None
+
+
+def generic_value(name: str, rx: re.Pattern[str], m: re.Match[str], scan: Scan) -> str | None:
+    """The value a generic pattern matched, or None when it is not a real-looking literal.
+    find_secrets and redact both decide through this one function."""
+    value = m.group("value") if "value" in rx.groupindex else m.group(0)
+    if not looks_real(value):
+        return None
+    if name == "credential assignment" and not credential_literal(m, scan):
+        return None
+    return value
+
+
+def find_secret_lines(
+    text: str, kind: TextKind = TextKind.FREE, layout: Layout | None = None
+) -> list[tuple[str, int, int]]:
+    """Return [(pattern name, first line, last line)] for secret-looking values in text; kind
+    is where the text comes from, layout gives regions of it a kind of their own."""
+    hits: list[tuple[str, int, int]] = []
     if not text:
         return hits
+    scan = Scan(text, kind, layout)
     for name, rx in SECRET_PATTERNS:
+        line, counted = 1, 0
         for m in rx.finditer(text):
-            if name in GENERIC:
-                value = m.group("value") if "value" in rx.groupindex else m.group(0)
-                if not looks_real(value):
-                    continue
-            line = text.count("\n", 0, m.start()) + 1
-            hits.append((name, line))
+            if name in GENERIC and generic_value(name, rx, m, scan) is None:
+                continue
+            line += text.count("\n", counted, m.start())
+            counted = m.start()
+            hits.append((name, line, line + text.count("\n", m.start(), m.end())))
     return hits
 
 
-def redact(text):
-    """Replace secret-looking values in text; returns (new_text, count)."""
+def find_secrets(text: str, kind: TextKind = TextKind.FREE, layout: Layout | None = None) -> list[tuple[str, int]]:
+    """Return [(pattern name, line number)] for secret-looking values in text, as
+    find_secret_lines does, with the line each one starts on."""
+    return [(name, first) for name, first, _ in find_secret_lines(text, kind, layout)]
+
+
+def redact(text: str, kind: TextKind = TextKind.FREE, layout: Layout | None = None) -> tuple[str, int]:
+    """Replace secret-looking values in text; returns (new_text, count). kind and layout as
+    for find_secrets."""
     count = 0
 
     def sub(name, rx):
         nonlocal text
+        scan = Scan(text, kind, layout)
 
         def repl(m):
             nonlocal count
             if name in GENERIC:
-                value = m.group("value") if "value" in rx.groupindex else m.group(0)
-                if not looks_real(value):
+                if generic_value(name, rx, m, scan) is None:
                     return m.group(0)
                 count += 1
                 start, end = m.span("value") if "value" in rx.groupindex else m.span(0)
@@ -1103,7 +1702,7 @@ def host_allowed(host):
     return host in EXTRA_HOSTS or any(host.endswith("." + h) for h in EXTRA_HOSTS)
 
 
-def check_outbound(op, toks):
+def check_outbound(data, op, toks):
     if not toks:
         return
     head = Path(toks[0]).name
@@ -1132,8 +1731,9 @@ def check_outbound(op, toks):
         if sends:
             phits = find_pii(" ".join(toks[1:]))
             if phits:
-                deny_pii(f"the `{head}` request", phits)
-        literal_credential = any(find_secrets(t) for t in toks[1:])
+                report_pii(data, pii_detail(f"the `{head}` request", phits))
+        # each argument leaves the machine as the shell wrote it
+        literal_credential = any(find_secrets(t, TextKind.OUTBOUND) for t in toks[1:])
         if literal_credential:
             deny(
                 "send-data-out",
@@ -1168,7 +1768,7 @@ def check_git(data, toks):
     if not sub:
         return
     cwd = data.get("cwd") or os.getcwd()
-    in_sub = bool(data.get("agent_id"))
+    in_sub = is_subagent(data)
     flags = [a for a in args if a.startswith("-")]
     positional = [a for a in args if not a.startswith("-")]
 
@@ -1183,7 +1783,7 @@ def check_git(data, toks):
         msg = " ".join(args)
         hits = find_pii(msg, cwd)
         if hits:
-            deny_pii(f"the `git {sub}` message", hits)
+            report_pii(data, pii_detail(f"the `git {sub}` message", hits))
     if sub == "config" and any(f in ("--global", "--system") for f in flags):
         deny(
             "destructive-command",
@@ -1193,12 +1793,13 @@ def check_git(data, toks):
         if "--amend" in flags and head_is_pushed(cwd):
             deny("protect-history", "`git commit --amend` would rewrite a commit that is already on the remote.")
         scan_staged(
+            data,
             cwd,
             include_unstaged=any(f in ("-a", "--all") for f in flags)
             or any(re.match(r"^-[a-zA-Z]*a", f) for f in flags),
         )
     elif sub == "add":
-        scan_add(cwd, args)
+        scan_add(data, cwd, args)
     elif sub == "push":
         check_push(cwd, flags, positional)
     elif sub == "reset" and any(f in ("--hard", "--merge") for f in flags):
@@ -1291,12 +1892,84 @@ def staged_pii_kinds(cwd, path, lines):
     return [kind for _, text in lines for kind, _ in find_pii(text, cwd)]
 
 
+def git_batch(args: list[str], request: list[str], cwd: str) -> bytes | None:
+    """stdout of a git command fed one request per line on stdin; None when it fails."""
+    try:
+        r = subprocess.run(
+            ["git", *args], cwd=cwd, input="".join(f"{q}\n" for q in request).encode(), capture_output=True, timeout=15
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def staged_blobs(cwd: str, paths: list[str]) -> dict[str, str]:
+    """The staged content of each of paths, read with one `git cat-file --batch-check` for
+    the sizes and one `git cat-file --batch` for the blobs of MAX_SCAN_BYTES or less; a
+    path git cannot show, or a larger blob, is left out."""
+    names = [p for p in paths if "\n" not in p]
+    check = "--batch-check=%(objectname) %(objecttype) %(objectsize)"
+    sizes = git_batch(["cat-file", check], [f":{p}" for p in names], cwd)
+    lines = sizes.decode(errors="replace").splitlines() if sizes else []
+    if len(lines) != len(names):
+        return {}  # one answer per request, or the answers cannot be matched to the paths
+    oids: dict[str, list[str]] = {}
+    for path, line in zip(names, lines, strict=True):
+        parts = line.split()
+        if len(parts) == 3 and parts[1] == "blob" and parts[2].isdigit() and int(parts[2]) <= MAX_SCAN_BYTES:
+            oids.setdefault(parts[0], []).append(path)
+    out = git_batch(["cat-file", "--batch"], list(oids), cwd) if oids else None
+    blobs: dict[str, str] = {}
+    pos = 0
+    while out is not None and pos < len(out):
+        newline = out.find(b"\n", pos)
+        header = out[pos:newline].split() if newline >= 0 else []
+        if len(header) != 3 or not header[2].isdigit():
+            break
+        size = int(header[2])
+        content = out[newline + 1 : newline + 1 + size].decode(errors="replace")
+        for path in oids.get(header[0].decode(errors="replace"), []):
+            blobs[path] = content
+        pos = newline + 1 + size + 1  # the content ends with a newline of its own
+    return blobs
+
+
+def staged_secrets(cwd: str, added: dict[str, list[tuple[int, str]]]) -> list[str]:
+    """`path (pattern name)` for each secret-looking value on the added lines of the staged
+    files. Only a credential assignment depends on the kind of a file, so a file whose added
+    lines hold no credential key word is scanned line by line as free text, and the others
+    whole from the index, with the kind their name or `#!` line gives, so that a string, a
+    comment or a value on the next line is read in its place; a hit counts when it touches
+    an added line. A file the index cannot give is scanned line by line with that kind."""
+    keyed = {path for path, lines in added.items() if any(CREDENTIAL_KEY.search(text) for _, text in lines)}
+    blobs = staged_blobs(cwd, sorted(keyed)) if keyed else {}
+    report = []
+    for path, lines in added.items():
+        if path not in keyed:
+            report += [f"{path} ({name})" for _, text in lines for name, _ in find_secrets(text)]
+            continue
+        blob = blobs.get(path)
+        first = next((text for n, text in lines if n == 1), None)
+        if first is None:
+            first = blob.split("\n", 1)[0] if blob is not None else ""
+        kind = path_kind(path) or shebang_kind(first) or TextKind.FREE
+        if blob is None:
+            report += [f"{path} ({name})" for _, text in lines for name, _ in find_secrets(text, kind)]
+            continue
+        numbers = sorted(n for n, _ in lines)
+        for name, first_line, last_line in find_secret_lines(blob, kind):
+            k = bisect.bisect_left(numbers, first_line)
+            if k < len(numbers) and numbers[k] <= last_line:
+                report.append(f"{path} ({name})")
+    return report
+
+
 # Diff output in one shape whatever the user's config: no color or external driver, a/ and
 # b/ prefixes, raw paths. Run from the top of the work tree, diff.relative hides nothing.
 DIFF_FIXED = ["--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/"]
 
 
-def scan_staged(cwd, include_unstaged=False):
+def scan_staged(data, cwd, include_unstaged=False):
     rc, top = git(["rev-parse", "--show-toplevel"], cwd)
     if rc != 0:
         return
@@ -1330,12 +2003,9 @@ def scan_staged(cwd, include_unstaged=False):
         elif not in_header and line.startswith("+"):
             added.setdefault(current, []).append((lineno, line[1:]))
             lineno += 1
-    report = []
+    report = staged_secrets(cwd, added)
     pii_report = []
     for path, lines in added.items():
-        for _, text in lines:
-            for name, _ in find_secrets(text):
-                report.append(f"{path} ({name})")
         pii_report.extend(f"{path} ({kind})" for kind in staged_pii_kinds(cwd, path, lines))
     if report:
         deny(
@@ -1343,14 +2013,10 @@ def scan_staged(cwd, include_unstaged=False):
             f"the staged changes contain secret-looking values: {', '.join(sorted(set(report))[:5])}. Move them to an ignored file or an environment variable.",
         )
     if pii_report:
-        deny(
-            "pii",
-            f"the staged changes contain personal or identifiable information: {', '.join(sorted(set(pii_report))[:5])}. "
-            "Replace it with a placeholder or a relative path, or the user adds a public contact to CONCLAVE_PII_ALLOW.",
-        )
+        report_pii(data, f"the staged changes contain personal or identifiable information: {listing(pii_report)}.")
 
 
-def scan_add(cwd, args):
+def scan_add(data, cwd, args):
     paths = [a for a in args if not a.startswith("-")]
     everything = any(a in ("-A", "--all", "-u", "--update") for a in args) or any(p in (".", ":/", "./") for p in paths)
     candidates = []
@@ -1365,22 +2031,24 @@ def scan_add(cwd, args):
     for c in candidates:
         if is_secret_file(c):
             deny("commit-secret", f"`{c}` is a secret file; do not stage it, add it to .gitignore.")
+    texts = []
     for c in candidates:
         full = Path(cwd) / c
         try:
             if full.is_file() and full.stat().st_size <= MAX_SCAN_BYTES:
-                text = full.read_text(errors="ignore")
-                hits = find_secrets(text)
-                if hits:
-                    deny(
-                        "commit-secret",
-                        f"`{c}` contains a secret-looking value ({hits[0][0]}, line {hits[0][1]}); do not stage it.",
-                    )
-                phits = find_file_pii(c, text, cwd)
-                if phits:
-                    deny_pii(f"`{c}`", phits)
+                texts.append((c, full.read_text(errors="ignore")))
         except OSError:
             continue
+    for c, text in texts:
+        hits = find_secrets(text, text_kind(c, text))
+        if hits:
+            deny(
+                "commit-secret",
+                f"`{c}` contains a secret-looking value ({hits[0][0]}, line {hits[0][1]}); do not stage it.",
+            )
+    pii_report = [f"{c} ({kind})" for c, text in texts for kind, _ in find_file_pii(c, text, cwd)]
+    if pii_report:
+        report_pii(data, f"the files to stage contain personal or identifiable information: {listing(pii_report)}.")
 
 
 RM_LIKE = {"rm", "shred", "unlink", "rmdir"}
@@ -1538,23 +2206,78 @@ def check_gh(data, toks):
     pair = (toks[1], toks[2])
     if pair not in GH_PUBLISHING and toks[1] != "api":
         return
-    if data.get("agent_id"):
+    if is_subagent(data):
         deny("subagent-no-git", f"`gh {' '.join(pair)}` from a subagent publishes on the user's behalf; only the main session does, after approval.")
     hits = find_pii(" ".join(toks[3:]), data.get("cwd"))
     if hits:
-        deny_pii(f"the `gh {' '.join(pair)}` text", hits)
+        report_pii(data, pii_detail(f"the `gh {' '.join(pair)}` text", hits))
     if pair in GH_PUBLISHING:
         PENDING_ASK.append(f"gh {' '.join(pair)}")
+
+
+ECHOES = {"echo", "printf"}
+
+
+def echoed_to_config(segs: list[tuple[str, list[str]]]) -> list[str]:
+    """The text of each echo or printf whose output a redirect or a following tee writes to
+    a config file: the arguments joined as the command prints them."""
+    out = []
+    for i, (_, toks) in enumerate(segs):
+        words = strip_wrappers(toks)
+        if not words or Path(words[0]).name not in ECHOES:
+            continue
+        targets = [words[k + 1] for k in range(len(words) - 1) if words[k] in REDIRECTS]
+        if i + 1 < len(segs) and segs[i + 1][0] in ("|", "|&"):
+            sink = strip_wrappers(segs[i + 1][1])
+            if sink and Path(sink[0]).name == "tee":
+                targets += [w for w in sink[1:] if not w.startswith("-") and w not in REDIRECTS]
+        if TextKind.CONFIG not in {text_kind(t) for t in targets}:
+            continue
+        args = [w for k, w in enumerate(words[1:], 1) if w not in REDIRECTS and words[k - 1] not in REDIRECTS]
+        while args and args[0].startswith("-"):
+            args.pop(0)  # echo -e, -n
+        text = " ".join(args).replace("\\n", "\n")
+        out.append(text)
+    return out
+
+
+DECLARERS = {"export", "readonly", "declare", "typeset", "local"}
+
+
+def shell_assignments(cmd: str) -> list[str]:
+    """The `NAME=value` words the shell assigns in cmd: the leading assignments of each
+    simple command, also after a wrapper such as env, and the arguments of export,
+    readonly, declare, typeset and local. The shell reads their values as strings."""
+    out: list[str] = []
+    start, declaring = True, False
+    for tok in tokenize(cmd):
+        if tok in OPERATORS:
+            start, declaring = True, False
+        elif ASSIGNMENT.match(tok) and (start or declaring):
+            out.append(tok)
+        elif declaring and tok.startswith("-"):
+            continue  # declare -x
+        elif start and (Path(tok).name in WRAPPERS or tok.startswith("-")):
+            continue  # env, sudo -E
+        else:
+            declaring = start and Path(tok).name in DECLARERS
+            start = False
+    return out
 
 
 def check_bash(data):
     cmd = data["tool_input"].get("command") or ""
     if not cmd.strip():
         return
-    for name, line in find_secrets(cmd):
+    # Every word reaches a program as written (NAME=value, --flag=value, -e NAME=value, echo
+    # arguments) and message text (git -m, -F - heredocs, gh --body and --title) leaves the
+    # machine, so the whole command is data: a bare value is a literal unless it is an
+    # expression, whatever fence or backticks surround it.
+    hits = find_secrets(cmd, TextKind.DATA)
+    if hits:
         deny(
             "write-secret",
-            f"the command contains a secret-looking value ({name}). Reference the secret through an environment variable the user set instead.",
+            f"the command contains a secret-looking value ({hits[0][0]}). Reference the secret through an environment variable the user set instead.",
         )
     # A heredoc body read as text is prose, not filenames; it is still scanned whole for
     # secrets (above) and, when it goes to a file, for pii like the Write tool's content.
@@ -1563,14 +2286,33 @@ def check_bash(data):
     for text in (without_bodies, *scripts):
         for _, toks in segments(text):
             check_secret_tokens(toks)
+        # the shell reads an assigned value as a string, as a config file does
+        if any(find_secrets(word, TextKind.CONFIG) for word in shell_assignments(text)):
+            deny(
+                "write-secret",
+                "the command assigns a secret-looking value to a shell variable. Reference the secret through an environment variable the user set instead.",
+            )
     check_secret_tokens(values)
+    for targets, body in bodies:
+        if TextKind.CONFIG in {text_kind(t, body) for t in targets}:
+            for name, line in find_secrets(body, TextKind.CONFIG):
+                deny(
+                    "write-secret",
+                    f"the heredoc text contains a secret-looking value ({name}, line {line}). Keep secrets in an ignored file or an environment variable and reference them by name.",
+                )
+    for text in echoed_to_config(segments(cmd)):
+        for name, _ in find_secrets(text, TextKind.CONFIG):
+            deny(
+                "write-secret",
+                f"the command writes a secret-looking value ({name}) to a config file. Keep secrets in an ignored file or an environment variable and reference them by name.",
+            )
     for targets, body in bodies:
         for target in targets:
             phits = find_file_pii(target, body, data.get("cwd"))
             if phits:
-                deny_pii(f"the heredoc text for `{Path(target).name}`", phits)
+                report_pii(data, pii_detail(f"the heredoc text for `{Path(target).name}`", phits))
     for op, toks in segments(cmd):
-        check_outbound(op, toks)
+        check_outbound(data, op, toks)
         check_git(data, toks)
         check_gh(data, toks)
         check_destructive(data, op, toks, cmd)
@@ -1587,10 +2329,20 @@ def check_read(data):
         )
 
 
+def new_text(inp: dict) -> str:
+    """The text a file tool writes: Write content, Edit new_string, MultiEdit edits and
+    NotebookEdit new_source."""
+    parts = [inp.get(k) for k in ("content", "new_string", "new_source")]
+    edits = inp.get("edits")
+    if isinstance(edits, list):
+        parts += [e.get("new_string") for e in edits if isinstance(e, dict)]
+    return "\n".join(p for p in parts if isinstance(p, str))
+
+
 def check_write(data):
     inp = data["tool_input"]
-    path = inp.get("file_path") or ""
-    content = inp.get("content") if "content" in inp else inp.get("new_string", "")
+    path = inp.get("file_path") or inp.get("notebook_path") or ""
+    content = new_text(inp)
     if path:
         if is_secret_file(path):
             deny(
@@ -1609,23 +2361,27 @@ def check_write(data):
                 "stay-in-project",
                 f"`{path}` is outside the project directory. Only the project, temp dirs and the scratchpad are writable.",
             )
-    hits = find_secrets(content or "")
-    if not hits:
-        phits = find_file_pii(path, content or "", data.get("cwd"))
-        if phits:
-            deny_pii(f"the new text for `{Path(path).name}`", phits)
+    # a markdown cell of a notebook is prose, whatever the notebook's language
+    kind = TextKind.FREE if inp.get("cell_type") == "markdown" else text_kind(path, content)
+    hits = find_secrets(content, kind)
     if hits:
         name, line = hits[0]
         deny(
             "write-secret",
             f"the content contains a secret-looking value ({name}, line {line} of the new text). Keep secrets in an ignored file or an environment variable and reference them by name.",
         )
+    phits = find_file_pii(path, content, data.get("cwd"))
+    if phits:
+        report_pii(data, pii_detail(f"the new text for `{Path(path).name}`", phits))
 
 
 def check_webfetch(data):
     url = data["tool_input"].get("url") or ""
-    if find_secrets(url):
+    if find_secrets(url, TextKind.OUTBOUND):
         deny("send-data-out", "the URL carries a credential-looking value.")
+    hits = find_pii(url, data.get("cwd"))
+    if hits:
+        report_pii(data, pii_detail("the WebFetch URL", hits))
 
 
 # ---- modes -------------------------------------------------------------------------
@@ -1639,44 +2395,206 @@ def mode_pre(data):
         check_write(data)
     elif tool == "WebFetch":
         check_webfetch(data)
+    # Every check has run and none denied: emit the asks, as one object.
+    reasons = []
+    if PENDING_PII:
+        findings = " ".join(dict.fromkeys(PENDING_PII))
+        reasons.append(
+            f"Conclave rule [pii]: {findings} Confirm only if this is intended; otherwise use "
+            f"{PII_PLACEHOLDER}, or add a public contact to CONCLAVE_PII_ALLOW."
+        )
     if PENDING_ASK and "commit-approval" not in ALLOW and "all" not in ALLOW:
         actions = ", ".join(dict.fromkeys(PENDING_ASK))
+        reasons.append(f"Conclave rule [commit-approval]: {actions} needs your explicit approval.")
+    if reasons:
         print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "ask",
-                "permissionDecisionReason": f"Conclave rule [commit-approval]: {actions} needs your explicit approval.",
+                "permissionDecisionReason": " ".join(reasons),
             }
         }))
 
 
-def redact_any(obj):
+def redact_any(obj, kind: TextKind = TextKind.FREE, layout: Layout | None = None):
     total = 0
     if isinstance(obj, str):
-        new, n = redact(obj)
+        new, n = redact(obj, kind, layout)
         return new, n
     if isinstance(obj, list):
         out = []
         for item in obj:
-            new, n = redact_any(item)
+            new, n = redact_any(item, kind, layout)
             out.append(new)
             total += n
         return out, total
     if isinstance(obj, dict):
         out = {}
         for k, v in obj.items():
-            new, n = redact_any(v)
+            new, n = redact_any(v, kind, layout)
             out[k] = new
             total += n
         return out, total
     return obj, 0
 
 
+def named_files(words: list[str]) -> list[str]:
+    """The file names a command line may show: each word, the path after a `REV:` or an
+    `--opt=`, so `git show HEAD:app.ini` and `--file=app.ini` count."""
+    names = []
+    for w in words:
+        if w.startswith("-") and "=" not in w:
+            continue
+        names += [w, w.rsplit(":", 1)[-1], w.split("=", 1)[-1]]
+    return names
+
+
+def config_or_free(files: list[str]) -> TextKind:
+    """Config when one of files is a config file, else free text."""
+    return TextKind.CONFIG if any(text_kind(f) is TextKind.CONFIG for f in files) else TextKind.FREE
+
+
+# Commands whose output is environment variables or stored configuration: the head alone,
+# or the head with one of these subcommands.
+ENV_DUMP_HEADS = {"set", "export", "declare", "typeset"}
+ENV_DUMP_FLAGS = {"-p", "-x", "-px", "-xp"}
+ENV_DUMP_SUBCOMMANDS = {
+    "heroku": {"config"},
+    "docker": {"inspect"},
+    "podman": {"inspect"},
+    "kubectl": {"describe", "get"},
+    "vault": {"kv", "read"},
+    "doppler": {"secrets"},
+    "systemctl": {"show", "show-environment"},
+}
+COMPOSE_TOOLS = {"docker", "podman"}
+# Commands whose output provably comes from the files they name: cat, head, tail, nl and
+# sed -n print them; grep prints a location before each line; diff and git print a `+++`
+# header before each file. The options of head, tail and sed that take a value.
+SHOW_TOOLS = {"cat", "head", "tail", "sed", "nl"}
+VALUE_OPTIONS = {
+    "head": {"-n", "-c", "--lines", "--bytes"},
+    "tail": {"-n", "-c", "--lines", "--bytes"},
+    "sed": {"-e", "-f", "-l", "--expression", "--file", "--line-length"},
+}
+SED_SCRIPT_OPTIONS = ("-e", "-f", "--expression", "--file")
+SED_QUIET = re.compile(r"-[A-Za-z]*n[A-Za-z]*|--quiet|--silent")
+GREP_TOOLS = {"grep", "egrep", "fgrep", "rg", "ag", "ack"}
+GIT_PATCH_SUBS = {"diff", "show", "log", "format-patch", "stash"}
+# What may follow grep or diff in a pipeline and still print its lines as they were.
+OUTPUT_FILTERS = {"head", "tail", "sort", "uniq", "grep", "egrep", "fgrep", "rg", "cat", "less", "more"}
+PATCH_SUFFIXES = {".diff", ".patch"}
+
+
+def simple_commands(words: list[str]) -> list[list[str]]:
+    """words split at the shell operators."""
+    commands: list[list[str]] = [[]]
+    for w in words:
+        if w in OPERATORS:
+            commands.append([])
+        else:
+            commands[-1].append(w)
+    return [c for c in commands if c]
+
+
+def unwrapped(words: list[str], wrappers: set[str]) -> list[str]:
+    """words after the leading assignments, options and wrappers (sudo, nice -n): the
+    command and its arguments. Unlike strip_wrappers it never denies."""
+    i = 0
+    while i < len(words) and (ASSIGNMENT.match(words[i]) or words[i].startswith("-") or Path(words[i]).name in wrappers):
+        i += 1
+    return words[i:]
+
+
+def shows_environment(words: list[str]) -> bool:
+    """True when a simple command prints environment variables or stored configuration: env
+    or printenv run on its own (also as the last word, after ssh, docker exec or kubectl
+    exec), set, export, declare, heroku config, docker inspect, docker compose config,
+    kubectl describe or get, vault kv or read, doppler secrets, systemctl show."""
+    rest = unwrapped(words, WRAPPERS - {"env"})
+    if not rest:
+        return False
+    head = Path(rest[0]).name
+    if head in ENV_DUMP_HEADS:
+        return all(w in ENV_DUMP_FLAGS for w in rest[1:])  # set, export -p; not set -e
+    if "printenv" in rest or Path(rest[-1]).name == "env":
+        return True
+    sub = next((w for w in rest[1:] if not w.startswith("-")), "")
+    if head == "docker-compose" or (head in COMPOSE_TOOLS and sub == "compose"):
+        return "config" in rest
+    return sub.split(":", 1)[0] in ENV_DUMP_SUBCOMMANDS.get(head, set())
+
+
+def shown_files(head: str, args: list[str]) -> list[str]:
+    """The files cat, head, tail, nl or sed -n print, or [] when the command may print
+    something else (sed without -n). A sed script given as the first argument is not one."""
+    if head == "sed" and not any(SED_QUIET.fullmatch(a) for a in args):
+        return []
+    script = head == "sed" and not any(a.startswith(SED_SCRIPT_OPTIONS) for a in args)
+    files: list[str] = []
+    value = False
+    for a in args:
+        if value:
+            value = False
+        elif a.startswith("-") and a != "-":
+            value = a in VALUE_OPTIONS.get(head, set())
+        elif script:
+            script = False
+        else:
+            files.append(a)
+    return files
+
+
+def output_reading(data: dict) -> tuple[TextKind, Layout | None]:
+    """How to read a tool result, from where it comes from: (kind, layout).
+
+    A Read has the kind of its file, a patch file the kinds its `+++` headers name. Grep
+    output, and that of a Bash grep, has the kind of the file each location names. diff
+    and git diff/show/log output has the kind of the file each `+++` header names. cat,
+    head, tail, nl or sed -n of source files alone is source, head or tail of several files
+    has the kind each `==> f <==` header names. A command that prints the environment or
+    stored configuration (shows_environment), or that names a config file, is config.
+    Everything else is free text."""
+    inp = data.get("tool_input") or {}
+    tool = data.get("tool_name")
+    if tool == "Read":
+        path = inp.get("file_path") or ""
+        if Path(path).suffix.lower() in PATCH_SUFFIXES:
+            return TextKind.FREE, diff_layout
+        return (text_kind(path) if path else TextKind.FREE), None
+    if tool == "Grep":
+        return config_or_free([f for f in (inp.get("path"), inp.get("glob")) if isinstance(f, str) and f]), grep_layout
+    if tool != "Bash":
+        return TextKind.FREE, None
+    # read with tokenize, not segments or strip_wrappers: those deny, a PreToolUse step
+    words = tokenize(inp.get("command") or "")
+    commands = simple_commands(words)
+    if any(shows_environment(c) for c in commands):
+        return TextKind.CONFIG, None
+    kind = config_or_free(named_files(words))
+    commands = [c for c in (unwrapped(c, WRAPPERS) for c in commands) if c]
+    if not commands:
+        return kind, None
+    first, rest = commands[0], commands[1:]
+    head, sub = Path(first[0]).name, git_parts(first)[0]
+    filtered = all(Path(c[0]).name in OUTPUT_FILTERS for c in rest)
+    if (head in GREP_TOOLS or sub == "grep") and filtered:
+        return kind, grep_layout
+    if (head == "diff" or sub in GIT_PATCH_SUBS) and filtered:
+        return kind, diff_layout
+    files = shown_files(head, first[1:]) if head in SHOW_TOOLS and not rest else []
+    if head in ("head", "tail") and len(files) > 1:
+        return kind, head_layout
+    if files and all(text_kind(f) is TextKind.SOURCE for f in files):
+        return TextKind.SOURCE, None
+    return kind, None
+
+
 def mode_post(data):
     resp = data.get("tool_response")
     if resp is None:
         return
-    new, n = redact_any(resp)
+    new, n = redact_any(resp, *output_reading(data))
     if n:
         print(
             json.dumps(
@@ -1695,7 +2613,8 @@ def mode_stop(data):
     if data.get("stop_hook_active"):
         return
     text = data.get("last_assistant_message") or ""
-    hits = find_secrets(text)
+    # prose, with its fenced blocks and code spans read as code
+    hits = find_secrets(text, TextKind.FREE, markdown_layout)
     if hits:
         names = ", ".join(sorted({h[0] for h in hits}))
         print(

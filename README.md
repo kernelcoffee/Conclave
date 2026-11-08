@@ -189,7 +189,7 @@ launched directly, with `args: { profile, exec }` or with a plain task string; s
 ## Guardrails
 
 The plugin ships hooks the harness runs on every tool call, in the main session and in
-every subagent. They block outright, with the rule name and the reason, and never
+every subagent. They block outright (or, for `commit-approval` and, from the main session, `pii`, ask first), with the rule name and the reason, and never
 echo a matched value. Overrides come only from the environment Claude Code was started
 with (`CONCLAVE_ALLOW=rule,rule`, `CONCLAVE_ALLOWED_HOSTS=host,host`,
 `CONCLAVE_PII_ALLOW=value,value`); an inline
@@ -198,16 +198,40 @@ with (`CONCLAVE_ALLOW=rule,rule`, `CONCLAVE_ALLOWED_HOSTS=host,host`,
 | Rule | Blocks |
 |---|---|
 | `read-secret-file` | Read, Grep, Glob, Edit, Write and shell access to `.env*`, keys, certificates, credential files, `~/.ssh`, `~/.aws`, `~/.config/gh` and the like (`.env.sample` and friends stay allowed); a heredoc body that `cat`, `tee`, `git commit -F -` or `gh --body-file -` takes as text is not read for filenames unless it is unquoted and holds a `$` or backtick, and a redirect target after it is still a path |
-| `write-secret` | Write/Edit content or a shell command carrying a private key, cloud, GitHub, Slack, Stripe, OpenAI/Anthropic, JWT or connection-string credential, or a real-looking `password=`/`token=` literal |
+| `write-secret` | Write/Edit content or a shell command carrying a private key, cloud, GitHub, Slack, Stripe, OpenAI/Anthropic, JWT or connection-string credential, or a real-looking `password=`/`token=` literal (a quoted value, or a bare one that is not an expression); a key name or a code expression alone never matches |
 | `commit-secret` | `git add` or `git commit` with a secret file or secret content staged |
-| `send-data-out` | request bodies, uploads, pipes into `curl`/`wget`, `scp`/`rsync`/`nc` to hosts outside localhost, private ranges and `CONCLAVE_ALLOWED_HOSTS`; any request carrying a literal credential |
+| `send-data-out` | request bodies, uploads, pipes into `curl`/`wget`, `scp`/`rsync`/`nc` to hosts outside localhost, private ranges and `CONCLAVE_ALLOWED_HOSTS`; any request carrying a literal credential (curl arguments and WebFetch URLs are read as outbound text: only a call, member path, index, environment lookup or placeholder passes) |
 | `subagent-no-git` | `git commit`, `push` or `tag` from a subagent |
 | `protect-history` | push to the default branch, force or delete pushes, `reset --hard`, amend or rebase of pushed commits, `branch -D`, reflog or gc pruning |
 | `destructive-command` | `rm -r` outside the project or on its root, `sudo`, `git clean -f`, wholesale `checkout --`/`restore .`, `stash drop`, `git config --global`, global package installs, writes to home config or system directories, piping downloads into a shell |
 | `stay-in-project` | Write/Edit or a writing shell command outside the project directory (temp dirs, the scratchpad and `~/.claude` are allowed) |
-| `no-secret-in-output` | a subagent hand-back or a final message that contains a secret-looking value; the author is sent back to rewrite it |
+| `no-secret-in-output` | a subagent hand-back or a final message that contains a secret-looking value; the author is sent back to rewrite it (inline code spans and unlabelled or language-labelled fences count as source, so illustrative code passes; see below) |
 | `commit-approval` | nothing is blocked: `git commit`, `push`, `tag` and publishing `gh` commands (pr, issue, release, gist) from the main session always raise a permission prompt, even in auto mode; set `CONCLAVE_ALLOW=commit-approval` when you want the session to commit on its own |
-| `pii` | personal or identifiable information in written files, staged changes, commit messages, `gh` text or data sent out: email addresses, phone numbers, home-directory paths naming a user, card, IBAN or national id numbers, and this machine's own git name, git email and home path. Placeholders (`user@example.com`, `/home/user`, `noreply` addresses) pass; `LICENSE`, `AUTHORS`, `CODEOWNERS` and similar files are exempt, and so are the author, maintainer, contributor and owner fields of `plugin.json`, `marketplace.json`, `package.json`, `pyproject.toml` and `Cargo.toml` (an email or the git identity there is a public contact; any other personal data in those files still blocks); a public contact goes in `CONCLAVE_PII_ALLOW` |
+| `pii` | personal or identifiable information in written files, staged changes, commit messages, `gh` text or data sent out: email addresses, phone numbers, home-directory paths naming a user, card, IBAN or national id numbers, and this machine's own git name, git email and home path. Placeholders (`user@example.com`, `/home/user`, `noreply` addresses) pass; `LICENSE`, `AUTHORS`, `CODEOWNERS` and similar files are exempt, and so are the author, maintainer, contributor and owner fields of `plugin.json`, `marketplace.json`, `package.json`, `pyproject.toml` and `Cargo.toml` (an email or the git identity there is a public contact; any other personal data in those files still blocks); a public contact goes in `CONCLAVE_PII_ALLOW`. The main session gets a permission prompt naming the kind and location (never the value), so you confirm the change is intended; a subagent is denied, as it cannot carry the prompt; if the same call also breaks a deny rule, the deny wins |
+
+A secret is a literal value, never a key name or a code expression. Known-prefix tokens
+match anywhere; a bare value after a credential key (`password`, `token`, `api_key`,
+`secret`, ...) that looks real is a secret unless it is an expression: a call, member
+path, index, environment lookup or template placeholder, or, in the code of a source
+file, a plain identifier. What the text is decides this, not its shape: source is a file
+with a programming-language extension or interpreter shebang; config is `.env`, `.ini`,
+`.toml`, `.yaml`, `.json`, shell scripts, Dockerfiles and the like, where only
+environment lookups and placeholders pass; the words of a shell command are data, and
+curl arguments and WebFetch URLs are outbound, where the same expressions pass but a
+plain identifier does not; everything else (prose, `.md`, `.txt`, tool output) is free
+text. A key inside a string, docstring, template literal, raw string or comment of a
+source file is read like a shell command word: only expressions and placeholders pass.
+Outside source text a member path or call whose names look random (`sk.<base64>.<base64>`,
+`<random>(prod)`) is a literal, not an expression, and a comparison or arithmetic
+operator after a value does not make it one anywhere. In free and config text a value
+may sit on the next line, unindented or as the first word of the line, and `=>` counts
+as a separator. In a final message inline code spans and fences that are unlabelled or
+labelled with a programming language are source; `hcl`, `terraform`, `nginx`, `apache`,
+`ssh-config`, `xml`, `csv`, `http`, `properties`, `dockerfile`, `ini`, `yaml`, `json`,
+`env`, `toml` and the like are config; `sh`, `bash` or `console` are data; `text`, `log`,
+`output`, `diff`, `patch` and any label not known are free, and a fence left open is free
+to the end of the message. A secret is always denied, redacted or refused, never asked
+about.
 
 Tool results from Bash, Read and Grep are scanned too: secret-looking values are
 replaced with `[REDACTED <kind>]` before the model sees them. This is a tripwire against

@@ -1,6 +1,6 @@
 ---
 name: plan
-description: Write the plan document for a task without building anything: functional spec (why, goals, non-goals, acceptance, decisions with their consequences) first, technical spec (current state, proposed model, alternatives, briefs, contracts, failure matrix) second. With --design, a design study proposes the model and argues the alternatives before the spec. Use before a large change, for a redesign, or to get a reviewable plan to approve.
+description: Write the plan document for a task without building anything: an analysis (request, current state, constraints, unknowns), then the functional spec (why, goals, non-goals, acceptance, decisions with their consequences), then the technical spec (proposed model, alternatives, briefs, contracts, failure matrix). With --design, a design study proposes the model and argues the alternatives before the spec. Use before a large change, for a redesign, or to get a reviewable plan to approve.
 argument-hint: "[--design] <task>"
 user-invocable: true
 ---
@@ -12,7 +12,7 @@ Arguments: `$ARGUMENTS`. `--design` turns design mode on; the rest is the task, 
 
 1. Read `.claude/conclave.json`. If it is missing, run the `conclave:init` skill first. Run the preflight checks from `lead.md` that concern the branch (a plan-only run may stay on any branch; say which).
 2. Triage as `lead.md` says and print the triage line, with `· design` when design mode is on. The tier decides what the document asks for; nothing is built here. Decide design mode yourself too: a task that redefines how something works, or a new feature with more than one defensible shape, gets it even without the flag; say so.
-3. Create the plan document and the run JSON exactly as `lead.md` describes (template, slug, `.claude/conclave/` in `.gitignore`), Status `planning`.
+3. Create the plan document and the run JSON as `lead.md` describes (template, slug, `.claude/conclave/` in `.gitignore`), Status `planning`, with one exception: whatever the tier, write no Analysis here and make no analysis stop, because the plan stage writes the specs. This is the plan-only rule under "The analysis checkpoint" in `lead.md`; step 6 fills the Analysis.
 4. Say what this spends before launching: pm and architect on the session model, plus the architect once more for the design study in design mode. Then launch:
 
 ```
@@ -22,7 +22,7 @@ Workflow({ name: "conclave:plan-team", args: { profile: <profile object>, exec: 
 Omit `mode` outside design mode. If the name is not registered, launch with `scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/plan-team.js"` and the same args.
 
 5. `needs-human` (design decisions, or pm or architect decisions): present each decision with AskUserQuestion, every option with its consequence, the recommendation first. Write the question, the options and `Chosen: <option>, <why>` under Decisions in the document, log it, then relaunch with `exec.decisions` set to the answers and `exec.proceed: true`. Repeat until the run returns `accepted`.
-6. Fill the document from the result: the Functional spec from `spec` (why, goals, non-goals, acceptance; decisions already written), the Technical spec from `design_study` when present (current state, problems folded into Why, proposed model, alternatives, migration, risks) and from `plan` (briefs per component, contracts, expected failures, risks and assumptions). Tick `plan` in Steps with the agents used; write the Budget estimate for the build. Status stays `planning`: approval is the user's next move, not yours.
+6. Fill the document from the result: the Analysis as `lead.md` says for a plan-only run under "The analysis checkpoint", which is the T3 rule at any tier (Current state from `design_study.current_state` when present; every subsection left unfilled holds the fixed line `(no separate analysis at this tier: see the briefs)`), the Functional spec from `spec` (why, goals, non-goals, acceptance; decisions already written), the Technical spec from `design_study` when present (problems folded into Why, proposed model, alternatives, migration, risks) and from `plan` (briefs per component, contracts, expected failures, risks and assumptions). Tick `plan` in Steps with the agents used and mark the analysis checkpoint step `- [x] analysis checkpoint: skipped, plan-only run`, so `/conclave:continue` resumes at the approval gate; write the Budget estimate for the build. Status stays `planning`: approval is the user's next move, not yours.
 7. End with the document path, a five-line summary of the Functional spec, the agent count used, and the one line that builds it once approved: `/conclave:continue <slug>` (or `/conclave --tier 3 <task>` when the user prefers to start again).
 
 Writes only the plan document and the run JSON.

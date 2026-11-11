@@ -143,7 +143,9 @@ labelled `-->|yes|` / `-->|no|` edges.
 | Reference (API, settings, CLI) | one table or list per family | every item, its type or shape, default, and effect; same format for every entry |
 | Decision record | the question in one sentence | options with consequences, the choice, why, what it rules out |
 
-The plan document (`templates/plan.md`) is a functional spec followed by a technical
-spec: its Current state and Proposed model sections get a diagram when the change touches
-more than two parts or a flow; its Contracts section gets a sequence diagram when two
-components talk; its Decisions are a table or a list with one consequence per option.
+The plan document (`templates/plan.md`) is an analysis (request, current state,
+constraints, unknowns) followed by a functional spec and a technical spec. Current state
+lives in the Analysis, not in the technical spec. Current state and Proposed model get a
+diagram when the change touches more than two parts or a flow; the Contracts section gets
+a sequence diagram when two components talk; Decisions are a table or a list with one
+consequence per option.

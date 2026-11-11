@@ -78,10 +78,15 @@ node tests/workflows.test.mjs                     # workflow control flow, fake 
 2. `/conclave <task>`. The lead prints a triage line such as
    `Tier T2 · backend · ~9 agents · opus×7 sonnet×2 · pace step · build → review → finish`
    and writes a plan document to `docs/plans/<date>-<slug>.md`. The document leads with
-   the functional spec (why, goals, non-goals, acceptance criteria, the decisions only
-   you can make, each option with its consequence) and follows with the technical spec
-   (current state, proposed model, alternatives, migration, risks, briefs per component,
-   contracts, expected failures). Nothing is built yet.
+   an Analysis (request, current state with file references, constraints, unknowns),
+   then the functional spec (why, goals, non-goals, acceptance criteria, the decisions
+   only you can make, each option with its consequence) and the technical spec (proposed
+   model, alternatives, migration, risks, briefs per component, contracts, expected
+   failures). Nothing is built yet.
+   At T2 the lead stops first after the Analysis, with a short summary and its unknowns,
+   before writing the specs; correct it there or confirm it. At T1 the Analysis opens the
+   summary at the approval stop; at T3 and in `/conclave:plan` there is no separate
+   analysis stop.
 3. You approve the plan. Nothing is built until you approve the plan document, at any
    pace; the functional spec is what you approve, and the technical spec serves it. Edit
    the document instead of replying if you prefer; the lead re-reads it. A redesign or a

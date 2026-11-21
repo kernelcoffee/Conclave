@@ -41,10 +41,12 @@ Restart Claude Code (or run `/reload-plugins`) to load it. An update is picked u
 when the version number changes; every release bumps it.
 
 You do not need to run `/conclave:init` again. The profile in each project belongs to
-that project and keeps working: new profile keys are optional and default to off. To see
-what a new version offers, run `/conclave:init` without `--force`: on an existing profile
-it validates it against the current schema, lists the keys you do not use yet, and
-reports check commands or paths that no longer exist. It changes nothing.
+that project and keeps working: new profile keys are optional and default to off, with one exception:
+`docs.diataxis` has no default, and absent means you have not been asked yet (the lead
+asks at the next task at T1 or above). To see what a new version offers, run
+`/conclave:init` without `--force`: on an existing profile it validates it against the
+current schema, lists the keys you do not use yet, reports check commands or paths that no
+longer exist, and says when the `docs.diataxis` question is still open. It changes nothing.
 
 From a local clone, for development:
 
@@ -171,7 +173,7 @@ Off by default; each one is a flag on `/conclave` or a profile setting.
 | `refuter` | Tries to refute each finding; only what survives reaches the devs | opus |
 | `test-engineer` | Black-box tests from the failure matrix, written before reading the implementation | opus |
 | `qa` | Checks, build, e2e, coverage gate, shortcut audit, flake runs | sonnet |
-| `docs-writer` | Keeps the docs the profile names in step with the change | sonnet |
+| `docs-writer` | Keeps the docs the profile names in step with the change; files them by kind when `docs.diataxis` is `true` | sonnet |
 | `devops` | CI, containers, packaging, version bumps, release | opus |
 | `verifier` | Runs gate commands (scope, freeze, checks) and reports exit codes and output verbatim; never fixes | sonnet |
 | `test-auditor` | Audits contract tests fail exactly as declared and are not tautologies; runs mutation probes | opus |
@@ -253,12 +255,36 @@ does not recognise. Test the rules offline with
 `.claude/conclave.json` describes the project: `pace` (how often a task pauses), `components` (each with `paths`, `tests`,
 `stacks`, `checks`, optional `build`, `e2e`, `coverage`, `setup`, `pitfalls`,
 `conventions`, `ui`), `contracts` between components, `stakes` (what severity `high`
-means here), `security.threat_model`, `docs` (including `docs.plans`, where plan documents go, and `docs.commit_plans`, default `false`: plan documents stay out of commits and the lead ignores the plans directory; `true` commits them with the change), `devops`, `gates`, `git`, `models` and
+means here), `security.threat_model`, `docs` (including `docs.plans`, where plan documents go, and `docs.commit_plans`, default `false`: plan documents stay out of commits and the lead ignores the plans directory; `true` commits them with the change; `docs.diataxis`, a yes or no the user sets for each project with no default, see "Documentation layout"), `devops`, `gates`, `git`, `models` and
 `tier_overrides`. Start from `plugins/conclave/templates/conclave.json`; the schema is
 `plugins/conclave/schemas/conclave.schema.json`. Findings are routed to the dev that owns
 the path, the docs writer, or devops by matching these entries. The same entries drive
 `bin/scope-check.sh` and `bin/freeze.sh`, which the verifier runs so that path ownership
 and frozen contract tests are enforced mechanically, not by prose.
+
+### Documentation layout
+
+`docs.diataxis` says whether the project's documentation follows
+[Diátaxis](https://diataxis.fr). It is the project user's decision and has no default:
+a missing key means nobody has been asked yet. `/conclave:init` asks for a new profile
+(yes recommended) and keeps an existing answer on `--force`; on an existing profile
+without the key, it reports the question as open. The lead asks it once, at the first
+task at T1 or above, when `docs.paths` is not empty, writes the answer into the profile
+and says so; it never asks when the key is present.
+
+| Answer | Effect |
+|---|---|
+| `true` | The docs-writer files new text in `tutorials/`, `how-to/`, `reference/` or `explanation/` under the first `docs.paths` entry that ends with `/`. When no entry ends with `/`, the yes adds `docs/`, because the scope gate reads an entry without the slash as one file. A missing directory is created with a short index file. |
+| `false` | Nothing changes: the documentation keeps its structure. |
+
+Existing documentation moves in small steps, only as a task touches it: the smallest
+section the task edits moves to the directory of its kind and leaves a one-line pointer
+in its old place. Nothing else moves. The README's entry-point sections (what the
+project is, a short feature list, install, first run, links to the four indexes) never
+move. Links to moved text are fixed inside `docs.paths`; links in files the
+docs-writer may not edit are reported to the lead. The rules are in
+`plugins/conclave/skills/writing-docs/SKILL.md`, section "Diátaxis". This repository's
+own documentation does not use it.
 
 ## Stack packs
 
@@ -278,7 +304,9 @@ and frozen contract tests are enforced mechanically, not by prose.
 | `stack-generic` | Fallback checklist for stacks without a pack |
 
 One more pack, `writing-docs`, is not a stack: it tells the docs writer and the lead how
-to structure a document and when a Mermaid diagram earns its place.
+to structure a document and when a Mermaid diagram earns its place. It also holds the
+`## Diátaxis` section (the four kinds, their directories and the small-step rule) that
+applies to a project whose profile sets `docs.diataxis` to `true`.
 
 Adding a stack:
 

@@ -8,8 +8,13 @@
 // never decides tier, rounds, lenses, models or pace. It runs the stage `exec.stage`
 // names (default "all") and returns `state` for the next launch:
 //
-//   plan     pm (spec, open decisions), architect (briefs, contracts, failure matrix,
-//            specialists), design duel, consultants. Ends with final briefs in state.
+//   analysis architect reads the current state before anyone specifies and returns
+//            ANALYSIS (request, current state, constraints, unknowns). Ends with
+//            state.analysis; with exec.decisions and a state.analysis it revises that reading.
+//   plan     analysis first when no analysis, plan or brief exists (unless skip lists
+//            "analysis"), then pm (spec, open decisions), architect (briefs, contracts,
+//            failure matrix, specialists), design duel, consultants. Ends with final
+//            briefs in state.
 //   build    contract tests (exec.contract), one dev per component, scope and freeze
 //            verified, cross-check of contract pairs, challenger rounds.
 //   review   lenses, refuters, fixes with re-check, mutation probes
@@ -20,8 +25,10 @@
 //
 // Every return carries status, stage, next_stage, state, summary and agents. Any phase can
 // stop with status "needs-human" and a decision_request; the lead resumes the same stage
-// with exec.decisions, exec.proceed = true and the same state. The lead may edit
-// state.briefs between stages from the plan document.
+// with the same state. Only when decision_request.context carries decisions or
+// needs_decision does it set exec.decisions to the user's answers and exec.proceed = true;
+// any other stop is relaunched without exec.proceed. The lead may refresh
+// state.analysis and state.briefs between stages from the plan document.
 
 export const meta = {
   name: 'dev-team',
@@ -29,6 +36,7 @@ export const meta = {
   whenToUse: 'Launched by the conclave lead for T2 and T3 tasks, one stage at a time (exec.stage) or all at once. Needs args.profile and args.exec.',
   phases: [
     { title: 'Profile', detail: 'read .claude/conclave.json when it was not passed in' },
+    { title: 'Analysis', detail: 'architect reads the current state before anyone specifies' },
     { title: 'Plan', detail: 'pm spec, then architect briefs, contracts and failure matrix' },
     { title: 'Design', detail: 'design duel: two devs propose and critique, the architect judges' },
     { title: 'Consult', detail: 'specialists advise the devs before the build' },
@@ -62,7 +70,7 @@ const pluginRoot = exec.plugin_root || ''
 const bin = pluginRoot ? `${pluginRoot}/bin` : '<conclave plugin>/bin'
 const contractMode = Boolean(exec.contract) && !skip.has('tests')
 const duel = exec.design === 'duel' && !skip.has('architect')
-const STAGES = ['plan', 'build', 'review', 'finish']
+const STAGES = ['analysis', 'plan', 'build', 'review', 'finish']
 const stage = STAGES.includes(exec.stage) ? exec.stage : 'all'
 const runs = (s) => stage === 'all' || stage === s
 const nextOf = (s) => (stage === 'all' ? null : STAGES[STAGES.indexOf(s) + 1] || null)
@@ -89,12 +97,21 @@ const decisionList = { type: 'array', items: DECISION }
 const DESIGN_STUDY = {
   type: 'object',
   properties: {
-    current_state: { type: 'string' }, problems: strList, proposed_model: { type: 'string' },
+    problems: strList, proposed_model: { type: 'string' },
     alternatives: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, summary: { type: 'string' }, pros: strList, cons: strList }, required: ['name', 'summary', 'pros', 'cons'] } },
     decisions: decisionList, migration: { type: 'string' }, risks: strList,
     diagrams: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, kind: { type: 'string' }, mermaid: { type: 'string' } }, required: ['title', 'mermaid'] } },
   },
-  required: ['current_state', 'problems', 'proposed_model', 'alternatives', 'decisions', 'migration', 'risks'],
+  required: ['problems', 'proposed_model', 'alternatives', 'decisions', 'migration', 'risks'],
+}
+const ANALYSIS = {
+  type: 'object',
+  properties: {
+    request: { type: 'string' }, current_state: { type: 'string' },
+    constraints: strList, unknowns: strList, components: strList,
+    diagrams: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, kind: { type: 'string' }, mermaid: { type: 'string' } }, required: ['title', 'mermaid'] } },
+  },
+  required: ['request', 'current_state', 'constraints', 'unknowns'],
 }
 const PROFILE = { type: 'object', properties: { profile: { type: 'object' }, error: { type: 'string' } }, required: ['profile'] }
 const SPEC = {
@@ -245,6 +262,20 @@ const matches = (file, pattern) => pattern.endsWith('/') ? file.startsWith(patte
 const failedRuns = (runs) => (runs || []).filter((r) => r.exit_code !== 0).map((r) => `$ ${r.command}\n(exit ${r.exit_code})\n${r.output_tail}`).join('\n\n')
 const uniq = (list) => [...new Set(list)]
 const shellQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
+// An analysis may come back from the lead rewritten from the plan document: a list as one
+// string, a missing field, or the whole reading as one string. Never throw on it, and
+// insert strings raw so Mermaid text reaches the prompt verbatim. The optional components
+// and diagrams are shown when present, so the reading reaches the next agents whole.
+const asText = (v) => (v == null || v === '') ? '(none)' : typeof v === 'string' ? v : Array.isArray(v) ? (v.length ? v.map((x) => `- ${typeof x === 'string' ? x : show(x)}`).join('\n') : '(none)') : show(v)
+const present = (v) => v != null && v !== '' && !(Array.isArray(v) && !v.length)
+const diagramText = (d) => (d && typeof d === 'object' && !Array.isArray(d))
+  ? `${asText(d.title)}${present(d.kind) ? ` (${asText(d.kind)})` : ''}:\n\`\`\`mermaid\n${asText(d.mermaid)}\n\`\`\``
+  : asText(d)
+const analysisBody = (a) => (a && typeof a === 'object' && !Array.isArray(a))
+  ? `Request:\n${asText(a.request)}\n\nCurrent state:\n${asText(a.current_state)}\n\nConstraints:\n${asText(a.constraints)}\n\nUnknowns:\n${asText(a.unknowns)}` +
+    (present(a.components) ? `\n\nComponents:\n${asText(a.components)}` : '') +
+    (present(a.diagrams) ? `\n\nDiagrams:\n${Array.isArray(a.diagrams) ? a.diagrams.map(diagramText).join('\n\n') : asText(a.diagrams)}` : '')
+  : asText(a)
 
 // ---- Profile ---------------------------------------------------------------
 if (!profile && prev.profile) profile = prev.profile
@@ -268,11 +299,15 @@ const ownerOf = (file) => {
 }
 
 // ---- state (restored from the previous stage, extended by this one) ------------------
-let components = prev.components || exec.components || []
+// Until a plan fixes them, the lead's components win over the state's: after the analysis
+// stage the lead re-triages with analysis.components and launches the plan with the result.
+const nonEmpty = (l) => (Array.isArray(l) && l.length ? l : null)
+let components = prev.plan ? (prev.components || exec.components || []) : (nonEmpty(exec.components) || nonEmpty(prev.components) || [])
 let plan = prev.plan || null
 let spec = prev.spec || null
 let duelResult = prev.design || null
 let designStudy = prev.design_study || null
+let analysis = prev.analysis || null
 const briefs = { ...(prev.briefs || {}) }
 const reports = { ...(prev.reports || {}) }
 const history = [...(prev.history || [])]
@@ -288,7 +323,7 @@ let docs = prev.docs || null
 let qa = prev.qa || null
 const agentsTotal = () => ({ n: agentsBefore + agentCount.n, byModel: agentCount.byModel, this_stage: agentCount.n })
 const snapshot = () => ({
-  profile, components, plan, spec, design: duelResult, design_study: designStudy, briefs, reports, history, contract, escalated,
+  profile, components, plan, spec, analysis, design: duelResult, design_study: designStudy, briefs, reports, history, contract, escalated,
   reviewClean, unresolved: lastConfirmed, probes, docsTouched, devopsTouched, tests, docs, qa,
   agents: agentsTotal(),
 })
@@ -333,6 +368,7 @@ const context = (names) => {
     (comps.length ? `Component(s) you work on:\n${show(comps)}\n\nStack packs: load each with the Skill tool before you start: ${packsFor(names).join(', ') || '(none)'}\n\n` : '') +
     `Contract(s):\n${contractsText()}\n\nExpected failures:\n${failuresText()}${frozenText()}`
 }
+const analysisText = () => (analysis ? `Analysis (the reading of the code this task rests on; work from it):\n${analysisBody(analysis)}\n\n` : '')
 const allowedPaths = (names, extra) => uniq([
   ...names.flatMap((n) => [...((byName[n] || {}).paths || []), ...((byName[n] || {}).tests || [])]),
   ...(extra || []),
@@ -391,16 +427,43 @@ const allReports = () => `Dev reports:\n${show(reports)}`
 // =============================================================================
 // Stage: plan
 // =============================================================================
-// A lead-written brief (T2) replaces the plan stage, whatever stage this launch runs.
-if (exec.brief && !plan) {
+// A lead-written brief (T2) replaces the plan stage in every stage this launch runs but the
+// analysis, whose state must leave the plan for the plan stage after the checkpoint.
+if (exec.brief && !plan && stage !== 'analysis') {
   for (const c of components) briefs[c] = exec.brief
   plan = { summary: 'lead-written brief', components, briefs: components.map((c) => ({ component: c, brief: exec.brief })), contracts: [], expected_failures: exec.expected_failures || [], specialists: [], needs_decision: [], security_sensitive: Boolean(exec.security_sensitive), touches_infra: false, dev_specialities: exec.dev_specialities || [] }
   log(`T${tier}: planning skipped, the lead wrote the brief for ${components.join(', ')}`)
 }
-const designStudyPrompt = () =>
+
+// ---- Analysis: the reading of the current state, before anyone specifies -----------
+// The explicit stage always runs it (a revision when exec.decisions carries the user's
+// correction of state.analysis); a plan or all-stages launch runs it first when nothing
+// was read or planned yet, without a stop before the pm. The checkpoint is the lead's.
+const analysisPrompt = (previous) =>
   `${context(components)}\n\n` +
+  (previous ? `Your previous analysis:\n${analysisBody(previous)}\n\nThe user corrected it. Re-read the code the correction points to and return the whole analysis again, revised:\n${exec.decisions}\n\n` : '') +
+  `ANALYSIS. Before anyone specifies or plans, read the code this task touches and return the reading only: the request restated (what is asked and what is not), how it works today (each claim with a file reference), the constraints that bound a solution (each with where it is written), the unknowns (each with what would settle it; an empty list when nothing is open), the components the reading shows involved (choose from: ${(profile.components || []).map((c) => c.name).join(', ')}), and one Mermaid diagram of the current state (flowchart or sequenceDiagram, real module and endpoint names, at most twelve nodes) when more than two parts or a flow are involved. Propose no model, brief or contract. Do not edit files.`
+if (stage === 'analysis' || (runs('plan') && !plan && !analysis && !skip.has('analysis'))) {
+  phase('Analysis')
+  const previous = stage === 'analysis' && exec.decisions ? analysis : null
+  const a = await run('architect', analysisPrompt(previous), { phase: 'Analysis', schema: ANALYSIS, label: 'analysis' })
+  if (!a) return stop('Analysis', 'The architect returned no analysis; relaunch the analysis stage.', {})
+  analysis = a
+}
+if (stage === 'analysis') {
+  log(`analysis stage done; ${agentCount.n} agent(s)`)
+  return stageDone('analysis')
+}
+
+const designStudyPrompt = () =>
+  `${context(components)}\n\n${analysisText()}` +
   (exec.decisions ? `The user answered your earlier design questions; honour them and leave decisions empty unless something new comes up:\n${exec.decisions}\n\n` : '') +
-  `DESIGN STUDY. Before anyone specifies or plans, establish the shape of the change: how it works today (with file references), the problems, the model you recommend, the alternatives you considered with their pros and cons, the decisions only the user can make (each option with its consequence, your recommendation first), how existing data and settings migrate, the risks, and one or two Mermaid diagrams (flowchart or sequenceDiagram, real module and endpoint names, at most twelve nodes) that show the current and the proposed model when more than two parts or a flow are involved. Argue the recommendation from the goal of the task, not from implementation convenience. Do not edit files.`
+  `DESIGN STUDY. Before anyone specifies or plans, propose the shape of the change.` +
+  (analysis ? ' Build on the analysis above: do not restate the current state, and report under risks every place where the code contradicts it.' : ' No analysis precedes this study: read the code this change touches first, and give a file reference for every claim about how it works today.') +
+  ` Return the problems, the model you recommend, the alternatives you considered with their pros and cons, the decisions only the user can make (each option with its consequence, your recommendation first), how existing data and settings migrate, the risks, and one Mermaid diagram of the proposed model (flowchart or sequenceDiagram, real module and endpoint names, at most twelve nodes) when more than two parts or a flow are involved. Argue the recommendation from the goal of the task, not from implementation convenience. Do not edit files.`
+// A study restored from a 0.4.5 state may still carry current_state; the analysis replaces
+// it, so the unconfirmed reading never reaches the planning architect.
+const studyText = () => show(Object.fromEntries(Object.entries(designStudy).filter(([k]) => k !== 'current_state')))
 const modelText = () => (designStudy ? `Chosen model (from the design study; spec against it, do not reopen it):\n${designStudy.proposed_model}\n\nMigration:\n${designStudy.migration}\n\n` : '')
 if (runs('plan')) {
   if (!plan && exec.mode === 'design' && !designStudy) {
@@ -417,7 +480,7 @@ if (runs('plan')) {
     phase('Plan')
     if (!skip.has('pm')) {
       spec = await run('pm',
-        `${context(components)}\n\n${modelText()}` +
+        `${context(components)}\n\n${analysisText()}${modelText()}` +
         (exec.decisions ? `The user answered your earlier questions; honour them and leave needs_decision empty unless something new comes up:\n${exec.decisions}\n\n` : '') +
         `Write the product spec for this task: goals, non-goals, acceptance criteria the test engineer can turn into cases, the components touched (choose from: ${(profile.components || []).map((c) => c.name).join(', ')}), whether the change is security sensitive, and the decisions only the user can make. Do not edit files.`,
         { phase: 'Plan', schema: SPEC, label: 'pm' })
@@ -430,9 +493,9 @@ if (runs('plan')) {
     }
     if (!skip.has('architect')) {
       plan = await run('architect',
-        `${context(components)}\n\n` +
+        `${context(components)}\n\n${analysisText()}` +
         (spec ? `Product spec from the pm:\n${show(spec)}\n\n` : '') +
-        (designStudy ? `Design study:\n${show(designStudy)}\n\n` : '') +
+        (designStudy ? `Design study:\n${studyText()}\n\n` : '') +
         (exec.decisions ? `User decisions:\n${exec.decisions}\n\n` : '') +
         `Contract pairs the profile declares: ${show(profile.contracts || [])}. Components available: ${(profile.components || []).map((c) => c.name).join(', ')}.\n` +
         `Plan the change: one brief per touched component, a contract for every declared pair whose both sides change, the expected-failure matrix, ad-hoc specialists if the fixed team lacks the knowledge, risks and assumptions.` +
@@ -820,6 +883,7 @@ return {
   spec,
   plan: { summary: plan.summary, contracts: plan.contracts, expected_failures: plan.expected_failures, specialists: plan.specialists, risks: plan.risks, assumptions: plan.assumptions },
   design: duelResult,
+  analysis,
   design_study: designStudy,
   contract: contract.tests.length ? { tests: contract.tests, files: contract.files } : null,
   review_clean: reviewClean,

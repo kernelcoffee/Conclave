@@ -84,14 +84,15 @@ node tests/workflows.test.mjs                     # workflow control flow, fake 
    model, alternatives, migration, risks, briefs per component, contracts, expected
    failures). Nothing is built yet.
    At T2 the lead stops first after the Analysis, with a short summary and its unknowns,
-   before writing the specs; correct it there or confirm it. At T1 the Analysis opens the
-   summary at the approval stop; at T3 and in `/conclave:plan` there is no separate
-   analysis stop.
+   before writing the specs; correct it there or confirm it. At T3 and in `/conclave:plan`
+   the architect writes the Analysis in a stage of its own and the run stops the same way,
+   before the pm specs anything; a correction that needs more reading of the code sends the
+   architect back to it. At T1 the Analysis opens the summary at the approval stop.
 3. You approve the plan. Nothing is built until you approve the plan document, at any
    pace; the functional spec is what you approve, and the technical spec serves it. Edit
    the document instead of replying if you prefer; the lead re-reads it. A redesign or a
    new feature with an open shape gets `--design`: a design study proposes the model and
-   argues the alternatives before the spec is written.
+   argues the alternatives, on the Analysis you confirmed, before the spec is written.
 4. One stage at a time. With the default pace, the lead pauses after each of build,
    review and finish with a short summary of what changed and what was caught, and the
    document updated. You say go, or edit the Briefs section first: the next stage builds
@@ -119,7 +120,7 @@ Nothing to the right of the plan document runs before you approve it; every late
 is a pause you release.
 
 Add `--dry-run` to see the triage and the plan without spending anything, `--tier N` to
-force a tier, `--design` to force the design study.
+force a tier, `--design` to force the design study (the proposal, after the analysis).
 
 ## Tiers
 
@@ -182,7 +183,7 @@ the profile's `models` block. No subagent ever commits.
 | `/conclave <task> [--tier N] [--rounds N] [--pace step\|plan\|auto] [--contract] [--duel] [--dry-run]` | Triage, write the plan document, run the task one stage at a time |
 | `/conclave:continue [slug]` | Resume a task at its next stage, from its plan document and run state |
 | `/conclave:init [--force]` | Generate `.claude/conclave.json` |
-| `/conclave:plan [--design] <task>` | Write the plan document only: functional spec, then technical spec; `--design` runs a design study (current state, proposed model, alternatives, decisions) first; no code |
+| `/conclave:plan [--design] <task>` | Write the plan document only: functional spec, then technical spec; the architect analyses the current state and you confirm it first; `--design` then runs a design study (proposed model, alternatives, decisions) before the spec; no code |
 | `/conclave:review [base-ref] [--lenses a,b,c]` | Review and refute the working-tree diff; changes nothing |
 | `/conclave:release <version>` | devops bumps versions, drafts the changelog, checks CI, proposes commit and tag |
 | `/conclave:audit [path]` | Whole-repo security sweep, one reviewer per component, refuters on high findings |

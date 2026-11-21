@@ -85,7 +85,7 @@ See `plugins/conclave/schemas/conclave.schema.json`. Key fields the scripts rely
   rounds: 1,                     // challenge and review rounds
   lenses: ["correctness", "security", "stack"],   // plus "conventions", "ux" when earned
   refute_votes_high: 1,          // 3 at T3
-  skip: [],                      // any of pm, architect, consult, crosscheck, challenge, tests, docs, qa
+  skip: [],                      // any of analysis (dev-team), pm, architect, consult, crosscheck, challenge, tests, docs, qa
   models: {}, effort: {},        // per-role or per-group overrides
   base: "origin/main",
   contract: false,               // T3 option: test-first contract tests, audited and frozen
@@ -94,9 +94,9 @@ See `plugins/conclave/schemas/conclave.schema.json`. Key fields the scripts rely
   decisions: "", proceed: false, // resume after a needs-human stop
   briefs_from_files: false,      // force agents to read their brief from the plugin agents dir
   plugin_root: "/abs/path/plugins/conclave",
-  stage: "all",                  // "plan" | "build" | "review" | "finish" | "all"; one stage per launch
+  stage: "all",                  // "analysis" | "plan" | "build" | "review" | "finish" | "all"; one stage per launch
   state: null,                   // the state object the previous stage returned, passed back verbatim
-  mode: "",                      // "design": a design study runs before the pm in the plan stage
+  mode: "",                      // "design": a design study runs, after the analysis, before the pm in the plan stage
   // pace ("step" | "plan" | "auto") is the lead's own setting; the script never reads it
 }
 ```
@@ -110,9 +110,15 @@ collides with the `plan`, `review` and `conclave` skills that drive them.
 ### Design mode and decisions
 
 `exec.mode: "design"` (plan stage of `dev-team`, and `plan-team`) runs the architect as a
-design study before the pm. It returns `current_state` (how it works today, with file
-references), `problems`, `proposed_model` (prose), `alternatives` (`name`, `summary`,
-`pros`, `cons`), `decisions`, `migration` and `risks`. When `decisions` is non-empty and
+design study before the pm, after the analysis. The study is the proposal only: it receives
+the analysis text, builds on it without restating it, and reports under `risks` where the
+code contradicts it. It returns `problems`, `proposed_model` (prose), `alternatives`
+(`name`, `summary`, `pros`, `cons`), `decisions`, `migration` and `risks`, and optionally
+`diagrams`. It has no `current_state`: how the code works today is the Analysis. When the
+lead launches the `analysis` stage, the user confirms it at the checkpoint before the study
+runs; a `plan` or `all` launch with no analysis in `state` runs one in the same launch,
+without a stop. A restored `state.design_study` that still carries `current_state`
+is accepted and the field ignored. When `decisions` is non-empty and
 `exec.proceed` is not set, the run stops with `status: "needs-human"` and
 `decision_request: { question: "Design decisions", context: { decisions, proposed_model,
 alternatives } }`; it resumes with `exec.decisions` and `exec.proceed: true` (and the
@@ -126,42 +132,58 @@ option with its consequence and writes `Chosen:` into the plan document.
 
 ### The analysis checkpoint
 
-Before any goal or brief, the lead writes the Analysis section of the plan document at T1
-and T2 from its own reading of the files the task touches: Request, Current state (each
-claim with a file reference), Constraints (each with where it is written) and Unknowns.
-It then re-triages, since the tier came from a grep and the Analysis is the first real
-reading; a changed tier is printed, recorded in the Tier line and run JSON, and logged.
+Before any goal or brief, the Analysis section of the plan document is written: by the
+lead at T1 and T2 from its own reading of the files the task touches, by the architect
+at T3 and in plan-only runs (below). It holds Request, Current state (each claim with a
+file reference), Constraints (each with where it is written) and Unknowns. The lead then
+re-triages, since the tier came from a grep and the Analysis is the first real reading; a
+changed tier is printed, recorded in the Tier line and run JSON, and logged.
 The re-triage never goes below T1, because the plan document already exists, and keeps a
-tier the user set with `--tier N` (the lead says what the Analysis found and asks).
+tier the user set with `--tier N` (the lead says what the Analysis found and asks). At T3
+the architect's `components` inform the re-triage; the scripts do not read them, and a T3
+the Analysis shows to be T2-sized goes on at T2 on that Analysis.
 
 | Tier | Analysis | Stops |
 |---|---|---|
 | T1 | written by the lead, then the specs right after | one: the approval gate, whose summary opens with the Analysis; approval marks the `analysis checkpoint` step confirmed and ticks `approved by the user` |
 | T2 | written by the lead | two: the checkpoint (Analysis summary of at most five lines and its Unknowns; Functional spec and Briefs still hold placeholders, Status stays `planning`), then the approval gate |
-| T3 | not written separately; Current state comes from `design_study.current_state` when a design study ran, other subsections hold `(no separate analysis at this tier: see the briefs)` | the approval gate only, which ticks `approved by the user` and marks the checkpoint skipped |
+| T3 and plan-only | written by the architect in its own stage (`exec.stage: "analysis"`), which fills the section from `state.analysis`; the pm and the planning architect then receive it | two, as at T2: the checkpoint, then the approval gate; a correction that needs code the architect did not read relaunches `analysis` with the correction in `exec.decisions`, and the stop is held again |
 
-The step's outcome is written after a colon in the Steps list:
+The step's outcome is written after a colon in the Steps list; from this version on only
+the confirmed mark is written:
 
 ```
 - [x] analysis checkpoint: confirmed by the user
-- [x] analysis checkpoint: skipped, no separate analysis at T3
-- [x] analysis checkpoint: skipped, plan-only run
 ```
 
-A plan-only run (`/conclave:plan`) follows the T3 rule at any tier, because the plan stage
-writes the specs: no Analysis before it, no stop, and the step is marked
-`skipped, plan-only run` when `plan` is ticked.
+Documents written by earlier versions may carry `skipped, no separate analysis at T3` or
+`skipped, plan-only run`, or the fixed line `(no separate analysis at this tier: see the
+briefs)` in the Analysis; they are read as past the checkpoint.
 
-No workflow script, return shape or Status value changes: the checkpoint is a lead
-procedure. `/conclave:continue` resumes a T2 run with the `analysis checkpoint` step
-unticked at the checkpoint, not at the approval gate; a document without that step is
-treated as past it.
+A plan-only run (`/conclave:plan`) follows the T3 rule at any tier, because the plan stage
+writes the specs: it launches `conclave:plan-team` with `stage: "analysis"`, holds the
+checkpoint, then launches the plan without `exec.proceed` and without `exec.decisions`.
+The run JSON carries `plan_only: true` and, after the analysis stage, `stage_done:
+"analysis"`.
+
+At T3 the lead refreshes `state.analysis` from the Analysis section before launching
+`plan` (each subsection into the field of the same name; an edit in the document wins).
+It launches `plan` without `exec.proceed`: the checkpoint is the user's confirmation of
+the analysis only, so the pm's and the architect's decisions, and the design study's,
+still stop the run as usual. The scripts never read `exec.proceed` in the analysis code.
+
+The checkpoint is a lead procedure; the scripts add the `analysis` stage and its shape
+(below) and no Status value. `/conclave:continue` resumes at T3 or in a plan-only run
+with `stage_done: null` and no `state.analysis` at stage `analysis`; with `stage_done:
+"analysis"` and the step unticked at the checkpoint, not at `plan` or the approval gate;
+with the step ticked, or absent, past the checkpoint. At T2 it resumes at the checkpoint
+when the step is unticked.
 
 ### The approval gate
 
 The build stage is never launched, at any pace, until the user has approved the plan
 document. The lead writes the Functional and Technical specs (itself at T1 and T2, from
-the plan stage at T3; at T2 only after the analysis checkpoint), shows the Functional
+the plan stage at T3; at T2 and T3 only after the analysis checkpoint), shows the Functional
 spec, and waits. Status moves `planning` →
 `approved` on the user's word → `building` on launch. Pace governs only the pauses after
 build, review and finish.
@@ -174,8 +196,11 @@ Every workflow returns a `status`:
   phase can stop: pm or architect decisions, a frozen test modified after the freeze, a
   tree the test auditor could not prove restored, an undecidable design duel, exhausted
   review rounds with open findings, a role that returned nothing. The lead handles every
-  one the same way: ask the user, relaunch with `exec.decisions`, `exec.proceed: true`
-  and `skip` narrowed to the phases already passed.
+  one the same way: ask the user, then relaunch the same stage with the same `state`. Only
+  when `decision_request.context` carries `decisions` or `needs_decision` does the relaunch
+  set `exec.decisions` to the user's answers and `exec.proceed: true`; any other stop is
+  relaunched without `exec.proceed`, which would silence the decision stops that follow in
+  that launch.
 - `accepted`: review clean and QA green (`ready_to_commit: true`), with `commit_plan`:
   ordered build-safe slices (`title`, `files`, `rationale`) that the lead proposes as
   separate commits: frozen contract tests first, each dev's slices, test additions, docs.
@@ -188,19 +213,49 @@ needs, so the lead can pause between stages and the user can read, edit and resu
 
 | Stage | Runs | Produces |
 |---|---|---|
-| `plan` | design study (`exec.mode: "design"`), pm, architect, design duel, consult | `state.briefs` (final), spec, contracts, expected failures |
+| `analysis` | the architect's analysis of the current state | `state.analysis` |
+| `plan` | the analysis first when there is no plan, no `state.analysis`, no `exec.brief` and `skip` lacks `analysis`; design study (`exec.mode: "design"`), pm, architect, design duel, consult | `state.analysis`, `state.briefs` (final), spec, contracts, expected failures |
 | `build` | contract tests, build, cross-check, challenge | files changed, challenges, escalations |
 | `review` | lenses, refute, fix, probes | findings raw, confirmed, fixed, probe results |
 | `finish` | tests, docs, QA | `accepted` or `not-ready`, `commit_plan` |
 
+`plan-team` runs two stages through `exec.stage`: `analysis` makes one architect call and
+returns `{ status: "stage-done", stage: "analysis", next_stage: "plan", task, analysis,
+design_study: null, spec: null, plan: null, stopped_for_decisions: false, state, agents }`;
+anything else, or no stage, is the plan, which runs the analysis first when
+`exec.state.analysis` is absent. Every plan return adds `stage: "plan"`, `next_stage: null`,
+`analysis` and `state: { analysis, agents }`, with `agents` as `{ n, byModel, this_stage }`
+and `n` cumulative over `exec.state.agents.n`. It restores only `analysis` and `agents`
+from `exec.state`: a resumed design study is re-run, the analysis is not. An empty analysis
+is `needs-human` with `phase: "Analysis"`, not a throw, and no pm call. The `state` it
+returns is accepted by `dev-team` stage `plan`, which then makes no analysis call.
+`plan-team` has no `skip`.
+
 Return contract of every launch: `status` (`stage-done`, `needs-human`, `accepted`,
-`not-ready`), `stage`, `next_stage` (`build`, `review`, `finish` or `null`), `state`
-(opaque to the lead except `state.briefs`, passed back verbatim), `summary` (components,
+`not-ready`), `stage`, `next_stage` (`plan`, `build`, `review`, `finish` or `null`), `state`
+(opaque to the lead except `state.briefs` and `state.analysis`, which it refreshes from the plan document; passed back verbatim otherwise), `summary` (components,
 files_changed, challenges, escalations, findings_raw, findings_confirmed,
 findings_fixed, probes, tests_added, docs_files, qa_green, agents_used), `agents`, and
 for `needs-human` the `decision_request`; a stop is resumed by relaunching the same
-stage with `exec.decisions`, `exec.proceed: true` and the same `state`. `stage: "all"`
-runs every stage in one launch. At T2 the lead never launches `plan`: it writes the brief
+stage with the same `state`; when `decision_request.context` carries `decisions` or
+`needs_decision`, also with `exec.decisions` set to the user's answers and `exec.proceed:
+true`, and any other stop is relaunched without `exec.proceed`. The analysis code never
+reads `exec.proceed`, and after the checkpoint the lead launches `plan` without it, so the
+plan stage's own decision stops are not silenced. `stage: "all"`
+runs every stage in one launch, the analysis first under the `plan` conditions above. `skip:
+["analysis"]` suppresses that implicit analysis and does not affect an explicit
+`stage: "analysis"`; `skip: ["architect"]` does not suppress it. An `analysis` launch
+always makes exactly one architect call (label `analysis`) and returns `stage-done` with
+`next_stage: "plan"`, `ready_to_commit: false` and `state.analysis`; every other restored
+state key is returned unchanged. With a `state.analysis` and `exec.decisions` the call
+revises the previous reading (its prompt carries both and the correction); without
+`decisions` it is a fresh reading that replaces `state.analysis`. When the architect
+returns nothing the run stops with `needs-human`, `phase: "Analysis"` and a question
+containing `no analysis`, with `state.analysis` as it was. The scripts accept a
+`state.analysis` as given and never throw on it: a field may be one string instead of a
+list, and the whole value may be one string. Strings reach the prompts raw under the
+header `Analysis (the reading of the code this task rests on; work from it):`. The `build`,
+`review` and `finish` stages return `analysis` unchanged and never call it. At T2 the lead never launches `plan`: it writes the brief
 itself and launches `build` with `exec.brief` and no `state`.
 
 The plan document lives at `<docs.plans>/<YYYY-MM-DD>-<slug>.md` (default
@@ -247,7 +302,13 @@ Code; prompts never paste it.
 
 ### Return shapes
 
-Enforced by JSON schema in the script: `SPEC` (pm), `PLAN` (architect, plus
+Enforced by JSON schema in the script: `SPEC` (pm), `ANALYSIS` (architect, analysis call:
+required `request`, `current_state`, `constraints`, `unknowns` (empty when nothing is open);
+optional `components` (profile component names) and `diagrams` of `{ title, mermaid }`
+with `kind` optional; declared identically in `dev-team.js` and `plan-team.js`, and
+guarded by `tests/check_repo.py` against the `- In an analysis:` line of `architect.md`),
+`DESIGN_STUDY` (architect, design-study call: `problems`, `proposed_model`, `alternatives`,
+`decisions`, `migration`, `risks`, optional `diagrams`), `PLAN` (architect, plus
 `dev_specialities`), `DESIGN`, `CRITIQUE`, `JUDGEMENT_DESIGN` (duel), `DEV` (plus
 `commit_plan`), `CROSSCHECK`, `CHALLENGE`, `FINDINGS`, `VERDICT`, `RECHECK`, `TESTS`
 (plus `test_files`, `contract_tests`, `could_not_reproduce`), `RED_AUDIT` and `PROBES`
@@ -295,10 +356,9 @@ ends with `/`, glob otherwise), else `docs-writer` for `docs.paths`, else `devop
 The docs-writer and the lead load one pack that says how each kind of document is
 structured, when a table or a code block beats prose, when a diagram earns its place, and
 the Mermaid patterns to use (flowchart, sequenceDiagram, stateDiagram-v2, erDiagram) with
-the syntax that bites. A design study may return `diagrams` (title, kind, mermaid); the
-lead places them under Analysis > Current state and Technical spec > Proposed model; at
-T3 only Current state is filled from the study, since the lead writes no other Analysis
-subsection there. In audit mode a stale diagram is a finding like a stale sentence. The stages, drawn the way
+the syntax that bites. The analysis and a design study may each return `diagrams` (title, kind, mermaid); the
+lead places the analysis's under Analysis > Current state and the study's under Technical
+spec > Proposed model. In audit mode a stale diagram is a finding like a stale sentence. The stages, drawn the way
 the pack asks:
 
 ```mermaid

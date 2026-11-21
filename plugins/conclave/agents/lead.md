@@ -117,6 +117,7 @@ Build the `exec` object:
 - T2: `brief` is written by you now: Goal, Files (real paths you verified), Steps, Tests to write, Docs to update, Acceptance. Set `skip: ["pm", "architect", "consult", "crosscheck", "docs"]` unless the task changes documented behaviour (then keep docs). `rounds: 1`, `refute_votes_high: 1`, `lenses: ["correctness", "security", "stack"]`, add `"conventions"` when the component lists `conventions` or CLAUDE.md has a conventions section, add `"ux"` when the component has `ui: true`.
 - T3: `brief: ""` so pm and architect run. `rounds: 2`, `refute_votes_high: 3`, `lenses: ["correctness", "security", "stack", "conventions"]` plus `"ux"` when a `ui` component is touched. `skip: []`. `mode: "design"` in design mode: on the confirmed Analysis the architect first proposes a model with real alternatives and the decisions they imply; the run stops with those decisions, and once answered the pm specs against the chosen model.
 - `models` and `effort`: only what `profile.models` or the user override.
+- `lead_files`: the files you changed yourself for this task that no component, docs or devops path covers (a line in `.gitignore`, a fix to the profile), as a list of paths or globs. The scope check allows them instead of sending them to a dev as out-of-scope edits. It is not kept in `state`: pass it on every launch.
 
 T3 options, off unless earned or asked for:
 

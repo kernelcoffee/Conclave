@@ -18,7 +18,8 @@
 //   build    contract tests (exec.contract), one dev per component, scope and freeze
 //            verified, cross-check of contract pairs, challenger rounds.
 //   review   lenses, refuters, fixes with re-check, mutation probes
-//            (profile.gates.mutation_probes).
+//            (profile.gates.mutation_probes). A relaunch starts from state.unresolved:
+//            the findings left open are judged again in round 1 with the new ones.
 //   finish   black-box tests, docs with audit, QA with one repair round; accepted or
 //            not-ready with the commit plan.
 //   all      every stage in one run.
@@ -29,6 +30,11 @@
 // needs_decision does it set exec.decisions to the user's answers and exec.proceed = true;
 // any other stop is relaunched without exec.proceed. The lead may refresh
 // state.analysis and state.briefs between stages from the plan document.
+//
+// exec.lead_files (optional, a list of paths or globs, read on every launch): files the
+// lead changed itself. Every scope check and QA's scope gate allow them, so they are
+// never sent to a dev as an edit outside the allowed paths. A single string is taken as a
+// list of one; any other value that is not a list of strings stops the launch with an error.
 
 export const meta = {
   name: 'dev-team',
@@ -66,6 +72,12 @@ const maxRounds = exec.rounds || (tier >= 3 ? 2 : 1)
 const skip = new Set(exec.skip || [])
 const lenses = exec.lenses || ['correctness', 'security', 'stack']
 const votesHigh = exec.refute_votes_high || 1
+// One path written as a string is a list of one. Anything else that is not a list of strings
+// stops the launch before any agent runs: ignoring it would send the lead's own files to a
+// dev to revert.
+const leadFilesRaw = typeof exec.lead_files === 'string' ? [exec.lead_files] : (exec.lead_files == null ? [] : exec.lead_files)
+if (!Array.isArray(leadFilesRaw) || leadFilesRaw.some((p) => typeof p !== 'string')) throw new Error('exec.lead_files must be a path or a list of paths (strings)')
+const leadFiles = leadFilesRaw.filter((p) => p !== '')
 const pluginRoot = exec.plugin_root || ''
 const bin = pluginRoot ? `${pluginRoot}/bin` : '<conclave plugin>/bin'
 const contractMode = Boolean(exec.contract) && !skip.has('tests')
@@ -248,17 +260,82 @@ async function run(role, prompt, opts) {
   }
 }
 const runAdhoc = (spec, prompt, opts) => { const model = modelFor('adhoc'); count(model); return agent(`${spec.brief}\n\n---\n\n${prompt}`, { effort: effortFor('adhoc'), ...(model ? { model } : {}), ...opts }) }
-const dedupe = (items) => {
-  const seen = new Set()
-  return items.filter((f) => {
-    const key = `${f.file}:${f.line || 0}:${(f.summary || '').slice(0, 40)}`
-    if (seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
-}
+// ---- findings: path reduction and merge (the same text in dev-team.js and review-team.js) ----
+// repoPath: reviewers write a finding's file relative or absolute, and the scripts cannot
+// see the file system, so an absolute path keeps its tail from the `/` before one of the
+// profile's component, test, docs or devops paths. A directory or glob path wins over an
+// exact file path (Dockerfile, README.md), which also names files inside the components;
+// then the longest path wins; for one path, its last place in the file. A relative path,
+// or one matching no path, is unchanged. It routes fixes and keys the merge; the file
+// shown to the refuter, the fix and the recheck is always one a reviewer wrote.
+// Known limits: without the repository root the place of the cut is a guess, and the same
+// shape reads both ways. It goes wrong when a directory above the repository is named like
+// a longer profile path (repository at /srv/backend/, paths app/ and backend/:
+// /srv/backend/app/x.py gives backend/app/x.py), when a directory inside a component is
+// named like that component (/srv/shop/backend/backend/settings.py gives
+// backend/settings.py, which /srv/requests/requests/api.py needs), or like a longer
+// profile path (app/ and tests/: /srv/shop/app/tests/t.py gives tests/t.py, which
+// /srv/src/shop/frontend/x.ts needs with src/). Then the fix may go to the wrong owner and
+// a relative copy of the same defect is judged apart.
+// mergeFindings judges one defect once: findings with a line are grouped by repository
+// path and line, findings without one by file and the first 40 characters of the summary.
+// A group is shown through its most severe copy (the first one on a tie), every lens
+// joined, and each other copy under also_reported ({ lens, severity, summary,
+// failure_scenario, suggested_fix when given, file when spelled differently }), so the
+// refuter, the fix and the recheck read every copy's scenario and location. Its file is a
+// relative spelling from the group when there is one, otherwise the leading copy's own.
 const globToRe = (g) => new RegExp('^' + g.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*\//g, '(.*/)?').replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$')
 const matches = (file, pattern) => pattern.endsWith('/') ? file.startsWith(pattern) : (pattern.includes('*') || pattern.includes('?')) ? globToRe(pattern).test(file) : file === pattern
+const profilePaths = () => [
+  ...(profile.components || []).flatMap((c) => [...(c.paths || []), ...(c.tests || [])]),
+  ...((profile.docs || {}).paths || []),
+  ...((profile.devops || {}).paths || []),
+].filter((p) => typeof p === 'string')
+const repoPath = (file) => {
+  if (typeof file !== 'string' || !file.startsWith('/')) return file
+  let best = null
+  for (const p of profilePaths()) {
+    const lead = p.split(/[*?]/)[0]
+    if (!lead) continue
+    const kind = lead === p && !p.endsWith('/') ? 0 : 1
+    const needle = `/${lead}`
+    for (let at = file.lastIndexOf(needle); at >= 0; at = at > 0 ? file.lastIndexOf(needle, at - 1) : -1) {
+      const tail = file.slice(at + 1)
+      if (!matches(tail, p)) continue
+      const better = !best || kind > best.kind || (kind === best.kind && (lead.length > best.lead.length || (lead.length === best.lead.length && at > best.at)))
+      if (better) best = { kind, lead, at, tail }
+      break
+    }
+  }
+  return best ? best.tail : file
+}
+const SEVERITY_RANK = { low: 1, medium: 2, high: 3 }
+const lensesOf = (f) => String(f.lens || '').split(', ').filter(Boolean)
+const reportOf = (f, file) => ({
+  lens: f.lens, severity: f.severity, summary: f.summary, failure_scenario: f.failure_scenario,
+  ...(f.suggested_fix ? { suggested_fix: f.suggested_fix } : {}),
+  ...(f.file !== file ? { file: f.file } : {}),
+})
+const mergeFindings = (items) => {
+  const groups = new Map()
+  for (const f of items) {
+    const key = f.line > 0 ? JSON.stringify(['line', repoPath(f.file), f.line]) : JSON.stringify(['text', f.file, f.line || 0, (f.summary || '').slice(0, 40)])
+    groups.set(key, [...(groups.get(key) || []), f])
+  }
+  return [...groups.values()].map((all) => {
+    if (all.length === 1) return all[0]
+    const top = all.reduce((t, f) => ((SEVERITY_RANK[f.severity] || 0) > (SEVERITY_RANK[t.severity] || 0) ? f : t), all[0])
+    const relative = all.find((f) => typeof f.file === 'string' && !f.file.startsWith('/'))
+    const file = relative ? relative.file : top.file
+    return {
+      ...top,
+      file,
+      lens: [...new Set(all.flatMap(lensesOf))].join(', '),
+      also_reported: [...(top.also_reported || []), ...all.filter((f) => f !== top).flatMap((f) => [reportOf(f, file), ...(f.also_reported || [])])],
+    }
+  })
+}
+// ---- end of the shared findings block ----
 const failedRuns = (runs) => (runs || []).filter((r) => r.exit_code !== 0).map((r) => `$ ${r.command}\n(exit ${r.exit_code})\n${r.output_tail}`).join('\n\n')
 const uniq = (list) => [...new Set(list)]
 const shellQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
@@ -289,7 +366,8 @@ const base = exec.base || profile.base || 'origin/main'
 const gates = profile.gates || {}
 const byName = {}
 for (const c of profile.components || []) byName[c.name] = c
-const ownerOf = (file) => {
+const ownerOf = (written) => {
+  const file = repoPath(written)
   if (file) {
     for (const c of profile.components || []) if ((c.paths || []).some((p) => matches(file, p))) return `dev:${c.name}`
     if (((profile.docs || {}).paths || []).some((p) => matches(file, p))) return 'docs-writer'
@@ -339,6 +417,7 @@ const summaryOf = () => ({
   probes: probes ? probes.verdict : null,
   tests_added: tests ? (tests.tests_added || []).length : 0,
   docs_files: docs ? (docs.files_changed || []).length : 0,
+  docs_audited: docs && typeof docs.audited === 'boolean' ? docs.audited : null,
   qa_green: qa ? qa.all_green : null,
   agents_used: agentCount.n,
 })
@@ -369,9 +448,12 @@ const context = (names) => {
     `Contract(s):\n${contractsText()}\n\nExpected failures:\n${failuresText()}${frozenText()}`
 }
 const analysisText = () => (analysis ? `Analysis (the reading of the code this task rests on; work from it):\n${analysisBody(analysis)}\n\n` : '')
+// The scope every check allows: the components' paths and tests, the extra paths of the
+// roles that ran, and the files the lead changed itself (exec.lead_files).
 const allowedPaths = (names, extra) => uniq([
   ...names.flatMap((n) => [...((byName[n] || {}).paths || []), ...((byName[n] || {}).tests || [])]),
   ...(extra || []),
+  ...leadFiles,
 ])
 
 // ---- verifier: scope and frozen ---------------------------------------------
@@ -710,9 +792,14 @@ if (runs('review')) {
     `Try to refute it. Read the code at that location and the callers. The finding stands only if the failure scenario is reachable in practice through this change. ` +
     `Set refuted=true if it cannot happen, is already handled, or is outside what the task changed. Default to refuted=true if unsure. Do not edit files.`
 
+  // A relaunch continues from the findings left open: they are judged again in round 1,
+  // without the verdict and recheck of the launch that left them open.
+  const VERDICT_KEYS = new Set(['refuted', 'verdict_reason', 'fixed', 'recheck_reason'])
+  const reopened = lastConfirmed.map((f) => Object.fromEntries(Object.entries(f).filter(([k]) => !VERDICT_KEYS.has(k))))
+  if (reopened.length) log(`review: ${reopened.length} finding(s) left open by the last launch are judged again`)
   reviewClean = false
   lastConfirmed = []
-  let carried = [...escalated]
+  let carried = [...escalated, ...reopened]
   escalated.length = 0
   for (let round = 1; round <= maxRounds; round++) {
     phase('Review')
@@ -724,9 +811,9 @@ if (runs('review')) {
         runAdhoc(spec, `${reviewPrompt()}\n\nReport findings only with a concrete failure scenario; an empty list is valid.`, { phase: 'Review', schema: FINDINGS, label: `review:${spec.name} r${round}` })
           .then((res) => (res ? res.findings.map((f) => ({ ...f, lens: spec.name })) : []))),
     ])).filter(Boolean).flat()
-    const fresh = dedupe([...carried, ...raw])
+    const fresh = mergeFindings([...carried, ...raw])
     carried = []
-    log(`review round ${round}: ${raw.length} finding(s), ${fresh.length} after dedup with escalations`)
+    log(`review round ${round}: ${raw.length} finding(s), ${fresh.length} after merging with the carried findings`)
     if (!fresh.length) { reviewClean = true; lastConfirmed = []; break }
 
     phase('Verify')
@@ -835,13 +922,20 @@ if (runs('finish')) {
         `AUDIT MODE. Another writer updated these documentation files for the change in the working tree: ${docs.files_changed.join(' ')}. Docs block: ${show(profile.docs)}.\n\n${context(components)}\n\n` +
         `Read git diff ${base} for both the code and the documentation. Check every claim in the changed documentation and in the comments of the changed source files against the code, with file and line. Report concrete corrections only; an empty list is a valid answer. Do not edit anything.`,
         { phase: 'Docs', schema: DOC_AUDIT, label: 'docs:audit' })
-      docCorrections = audit ? audit.corrections : []
+      // An audit that returns nothing did not check the docs: say so, and go on to QA.
+      if (!audit) {
+        log('docs audit: the auditor returned nothing; the documentation is not audited')
+        docs = { ...docs, audited: false }
+      } else {
+        docs = { ...docs, audited: true }
+        docCorrections = audit.corrections
+      }
       if (docCorrections.length) {
         log(`docs audit: ${docCorrections.length} correction(s)`)
         const fixed = await run('docs-writer',
           `An auditor checked your documentation against the code and reports these corrections. Apply each one you can verify in the code; for any you believe is wrong, leave the text and say why under gaps. Docs you own: ${show(profile.docs)}.\n\n${context(components)}\n\n${docCorrections.map((c) => `- ${c.file}: "${c.quoted}" → ${c.true_statement} (evidence: ${c.evidence})`).join('\n')}`,
           { phase: 'Docs', schema: DOCS, label: 'docs:fix' })
-        if (fixed) docs = { ...fixed, corrections_applied: docCorrections.length }
+        if (fixed) docs = { ...fixed, corrections_applied: docCorrections.length, audited: true }
       }
     }
   }
@@ -852,6 +946,7 @@ if (runs('finish')) {
     const qaPrompt = () =>
       `Verify this change end to end. Base ref: ${base}. Gates: ${show(gates)}. Plugin bin dir with diff-coverage.sh, shortcut-audit.sh, scope-check.sh and freeze.sh: ${bin}.\n` +
       `Allowed paths for the scope gate: ${allowedPaths(components, extraAllowed()).join(' ')}.\n` +
+      (leadFiles.length ? `Of these, the lead changed ${leadFiles.join(' ')} itself; they are not a dev's edit outside the allowed paths.\n` : '') +
       (contract.checksums ? `Frozen checksums for the frozen gate (feed to freeze.sh verify on stdin):\n${contract.checksums}\n` : '') +
       `\n${context(components)}\n\n${allReports()}`
     qa = await run('qa', qaPrompt(), { phase: 'QA', schema: QA, label: 'qa' })
@@ -875,7 +970,7 @@ const commitPlan = []
 if (contract.files.length) commitPlan.push({ title: 'test: add contract tests (red before the implementation)', files: contract.files, rationale: 'the frozen contract; red at this commit' })
 for (const c of components) for (const s of ((reports[c] || {}).commit_plan || [])) commitPlan.push({ ...s, component: c })
 if (tests && (tests.tests_added || []).length) commitPlan.push({ title: 'test: black-box tests from the failure matrix', files: tests.test_files || [], rationale: 'test engineer additions' })
-if (docs && docs.files_changed.length) commitPlan.push({ title: 'docs: align documentation with the change', files: docs.files_changed, rationale: 'docs writer, audited' })
+if (docs && docs.files_changed.length) commitPlan.push({ title: 'docs: align documentation with the change', files: docs.files_changed, rationale: docs.audited === false ? 'docs writer, not audited' : 'docs writer, audited' })
 return {
   status: ready ? 'accepted' : 'not-ready',
   stage: stage === 'all' ? 'all' : 'finish', next_stage: null,

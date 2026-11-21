@@ -24,6 +24,17 @@ function load(file) {
   return new Function('args', 'agent', 'parallel', 'pipeline', 'phase', 'log', 'budget', `return (async () => {\n${body}\n})()`)
 }
 
+// A verifier that runs scope-check.sh as bin/scope-check.sh would: the allowed paths are the
+// quoted arguments of the command in the prompt, `changed` is what git would list.
+function scopeCheck(prompt, changed) {
+  const line = prompt.split('\n').find((x) => x.includes('scope-check.sh')) || ''
+  const allowed = [...line.matchAll(/'([^']*)'/g)].map((m) => m[1])
+  const globRe = (g) => new RegExp('^' + g.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*\//g, '(.*/)?').replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$')
+  const inScope = (f) => allowed.some((p) => p.endsWith('/') ? f.startsWith(p) : /[*?]/.test(p) ? globRe(p).test(f) : f === p)
+  const out = changed.filter((f) => !inScope(f))
+  return { runs: [{ command: line, exit_code: out.length ? 1 : 0, output_tail: out.map((f) => `out of scope: ${f}`).join('\n') }], all_passed: !out.length }
+}
+
 // The fake agent: answers each call by its label, with knobs per scenario.
 function fakeAgent(sc, calls) {
   const st = { chal: {}, probes: 0, qa: 0 }
@@ -43,6 +54,7 @@ function fakeAgent(sc, calls) {
     if (l.startsWith('contract:try')) return { cases: ['c'], tests_added: ['t1'], test_files: ['backend/tests/test_c.py'], contract_tests: [{ file: 'backend/tests/test_c.py', name: 't1', criterion: 'a', behaviour: 'failure', expected_failure: 'assert 400' }], could_not_reproduce: false, bugs: [], untestable: [], checks_passed: false }
     if (l.startsWith('contract:audit')) return { valid: true, per_test: [{ file: 'backend/tests/test_c.py', name: 't1', fails_as_declared: true, actual_failure: 'assert 400', can_fail: true, note: '' }], other_tests_pass: true, runs: [] }
     if (l === 'contract:freeze' || l === 'probes:refreeze') return { runs: [{ command: 'freeze', exit_code: 0, output_tail: 'abc  backend/tests/test_c.py' }], all_passed: true }
+    if (sc.changed && opts.agentType === 'conclave:verifier') return scopeCheck(prompt, sc.changed)
     if (l.startsWith('verify:') && /verify:(build|challenge|fix|tests)/.test(l)) {
       const scopeFail = sc.scopeFails && l === 'verify:build'
       const frozenFail = sc.frozenFails && l === 'verify:build'
@@ -50,6 +62,7 @@ function fakeAgent(sc, calls) {
     }
     if (l.startsWith('xcheck')) return { mismatches: [] }
     if (l.startsWith('challenge')) { const c = l.split(' ')[0]; st.chal[c] = (st.chal[c] || 0) + 1; return st.chal[c] === 1 ? { challenges: [{ file: 'backend/x.py', severity: 'high', summary: 'c1', why_it_matters: 'w', demand: 'd' }] } : { challenges: [], escalations: [] } }
+    if (l.startsWith('review:') && sc.reviews) return { findings: sc.reviews(l) }
     if (l.startsWith('review:')) return l.includes('correctness') && (l.endsWith('r1') || !/ r\d$/.test(l)) && !sc.cleanReview ? { findings: [{ file: 'backend/x.py', line: 1, severity: 'high', summary: 'bug', failure_scenario: 'f' }] } : { findings: [] }
     if (l.startsWith('verify')) return { refuted: Boolean(sc.refuteAll), reason: 'r' }
     if (l.startsWith('recheck')) return { fixed: !sc.notFixed, reason: 'ok' }
@@ -59,8 +72,10 @@ function fakeAgent(sc, calls) {
       return { probes: [{ file: 'backend/tests/test_c.py', name: 't1', mutation: 'invert guard', test_failed: st.probes > 1 }], tree_restored: true, verdict: st.probes > 1 ? 'pass' : 'reject', rejection: st.probes > 1 ? '' : 'survived', runs: [] }
     }
     if (l === 'probes:repair') return { cases: [], tests_added: ['t1'], test_files: ['backend/tests/test_c.py'], bugs: [], checks_passed: true }
-    if (l === 'test-engineer') return { cases: ['c'], tests_added: ['t2'], test_files: ['backend/tests/test_d.py'], bugs: [], untestable: [], checks_passed: true }
+    if (l === 'test-engineer') return { cases: ['c'], tests_added: ['t2'], test_files: ['backend/tests/test_d.py'], bugs: sc.teBugs ? [{ file: 'backend/x.py', line: 3, summary: 'te bug', failure_scenario: 'f' }] : [], untestable: [], checks_passed: true }
     if (l === 'docs') return { summary: 'd', files_changed: ['docs/a.md'] }
+    if (l === 'docs:audit' && sc.auditNothing) return null
+    if (l === 'docs:audit' && sc.auditEmpty) return { corrections: [] }
     if (l === 'docs:audit') return { corrections: [{ file: 'docs/a.md', quoted: 'x', true_statement: 'y', evidence: 'z' }] }
     if (l === 'docs:fix' || l.endsWith(':docs')) return { summary: 'fixed', files_changed: ['docs/a.md'] }
     if (l.startsWith('qa')) { st.qa++; return { all_green: !(sc.qaRed && st.qa === 1), suites: [{ name: 'tests', passed: !(sc.qaRed && st.qa === 1) }], code_fixes_needed: sc.qaRed && st.qa === 1 ? ['fix y'] : [] } }
@@ -83,6 +98,38 @@ const T3 = { tier: 3, task: 'feature', components: ['backend', 'frontend'], roun
 // An analysis as the lead passes it back in state after the checkpoint.
 const A = { request: 'do x', current_state: 'today: a.js calls b.js', constraints: ['c1 (docs/x.md)'], unknowns: [] }
 const PT = { task: 'x', components: ['backend'], plugin_root: '/plug' }
+// A state as the build stage leaves it, for launching the review stage directly.
+const reviewState = (components, extra) => ({
+  components, plan: { summary: 'x', components, contracts: [], expected_failures: [], specialists: [] },
+  briefs: Object.fromEntries(components.map((c) => [c, 'b'])),
+  reports: Object.fromEntries(components.map((c) => [c, { summary: 'dev', files_changed: [], checks_passed: true }])),
+  reviewClean: false, ...extra,
+})
+// Findings a review launch left open, with the verdict and recheck fields of that launch.
+const OPEN = [
+  { file: 'backend/a.py', line: 4, severity: 'medium', summary: 'open one', failure_scenario: 'f1', lens: 'correctness', refuted: false, verdict_reason: 'OLD-VERDICT-1', fixed: false, recheck_reason: 'OLD-RECHECK-1' },
+  { file: 'backend/b.py', line: 9, severity: 'low', summary: 'open two', failure_scenario: 'f2', lens: 'security', refuted: false, verdict_reason: 'OLD-VERDICT-2', fixed: false, recheck_reason: 'OLD-RECHECK-2' },
+]
+// Refuter calls (not the verifier's scope checks), by label; their prompts.
+const refuterLabels = (r) => r.calls.filter((c) => c.type === 'refuter' && c.label.startsWith('verify:')).map((c) => c.label)
+const refuterPrompts = (r) => r.calls.filter((c) => c.type === 'refuter' && c.label.startsWith('verify:')).map((c) => c.prompt)
+const recheckLabels = (r) => r.labels.filter((l) => l.startsWith('recheck:'))
+const fixFindings = (r) => (r.result.state.history.find((h) => h.phase === 'fix r1') || {}).findings || []
+const occurrences = (text, needle) => text.split(needle).length - 1
+// Lenses that answer by label; the others return nothing.
+const byLens = (table) => (label) => { const k = Object.keys(table).find((x) => label.startsWith(`review:${x}`)); return k ? table[k] : [] }
+const T2R = (over) => ({ ...T2, stage: 'review', ...over })
+const sharedBlock = (script) => {
+  const src = fs.readFileSync(path.join(root, 'plugins/conclave/workflows', `${script}.js`), 'utf8')
+  const start = src.indexOf('// ---- findings: path reduction and merge')
+  const end = src.indexOf('// ---- end of the shared findings block ----')
+  if (start < 0 || end < start) throw new Error(`${script}: shared findings block not found`)
+  return src.slice(start, end)
+}
+// A profile whose component paths are short enough to occur twice in an absolute path.
+const SHORT = { ...template, components: [{ ...template.components[0], paths: ['src/'], tests: ['tests/'] }, { ...template.components[1], paths: ['web/src/'], tests: ['web/tests/'] }] }
+const LEAD = ['.gitignore', 'docs/plans/']
+const CHANGED = ['backend/x.py', '.gitignore', 'docs/plans/p.md']
 
 const cases = [
   ['dev-team T2 accepted', 'dev-team', { profile: profileWith({}), exec: T2 }, (r) => {
@@ -564,6 +611,261 @@ const cases = [
   ['te: plan-team string launch whose analysis returns nothing stops, no throw', 'plan-team', { rawArgs: 'add a thing', exec: {}, noAnalysis: true }, (r) => {
     eq(r.result.status, 'needs-human'); eq(r.result.phase, 'Analysis'); eq(r.labels.join(','), 'profile,analysis')
     eq(r.result.stopped_for_decisions, false); eq(r.result.spec, null); eq(r.result.plan, null)
+  }],
+
+  // ---- review cost: resume, routing, merge, docs audit, lead files ------------------------
+  ['[resume] a relaunched review judges the findings left open, without their old verdicts', 'dev-team', { profile: profileWith({}), exec: T2R({ state: reviewState(['backend'], { unresolved: OPEN }) }), reviews: () => [] }, (r) => {
+    eq(r.result.status, 'stage-done'); eq(r.result.state.reviewClean, true); deepEq(r.result.state.unresolved, [])
+    eq(refuterLabels(r).sort().join(','), 'verify:a.py,verify:b.py')
+    for (const p of refuterPrompts(r)) { lacks(p, 'OLD-'); lacks(p, '"recheck_reason"'); lacks(p, '"fixed"') }
+    contains(refuterPrompts(r).join('\n'), 'open one'); contains(refuterPrompts(r).join('\n'), 'open two')
+    const fix = promptOf(r, 'fix r1:backend')
+    contains(fix, 'open one'); contains(fix, 'open two'); lacks(fix, 'OLD-'); lacks(fix, '"recheck_reason"')
+    eq(recheckLabels(r).length, 2)
+  }],
+  ['[resume] a finding left open and reported again at the same file and line is judged once', 'dev-team', { profile: profileWith({}), exec: T2R({ state: reviewState(['backend'], { unresolved: OPEN }) }), reviews: byLens({ correctness: [{ file: 'backend/a.py', line: 4, severity: 'medium', summary: 'reported again in other words', failure_scenario: 'g' }] }) }, (r) => {
+    eq(r.result.status, 'stage-done')
+    eq(refuterLabels(r).sort().join(','), 'verify:a.py,verify:b.py'); eq(recheckLabels(r).length, 2)
+    const a = fixFindings(r).find((f) => f.file === 'backend/a.py')
+    eq(a.summary, 'open one'); deepEq(a.also_reported, [{ lens: 'correctness', severity: 'medium', summary: 'reported again in other words', failure_scenario: 'g' }])
+    eq(fixFindings(r).length, 2); eq(occurrences(promptOf(r, 'fix r1:backend'), '"failure_scenario": "g"'), 1)
+  }],
+  ['[resume] a review launch with no open findings and silent reviewers ends clean with no refuter', 'dev-team', { profile: profileWith({}), exec: T2R({ state: reviewState(['backend'], { unresolved: [] }) }), reviews: () => [] }, (r) => {
+    eq(r.result.status, 'stage-done'); eq(r.result.state.reviewClean, true); notIncludes(r.types, 'refuter')
+  }],
+  ['[routing] an absolute path under a frontend path is fixed by frontend, whatever the order of exec.components', 'dev-team', { profile: profileWith({}), exec: T2R({ components: ['backend', 'frontend'], state: reviewState(['backend', 'frontend']) }), reviews: byLens({ correctness: [{ file: '/home/dev/work/shop/frontend/src/App.tsx', line: 12, severity: 'medium', summary: 's', failure_scenario: 'f' }] }) }, async (r) => {
+    includes(r.labels, 'fix r1:frontend'); notIncludes(r.labels, 'fix r1:backend')
+    const o = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: T2R({ components: ['frontend', 'backend'], state: reviewState(['frontend', 'backend']) }), reviews: byLens({ correctness: [{ file: '/home/dev/work/shop/frontend/src/App.tsx', line: 12, severity: 'medium', summary: 's', failure_scenario: 'f' }] }) })
+    includes(o.labels, 'fix r1:frontend'); notIncludes(o.labels, 'fix r1:backend')
+    const d = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: T2R({ components: ['backend', 'frontend'], state: reviewState(['backend', 'frontend']) }), reviews: byLens({ correctness: [{ file: '/home/dev/work/shop/docs/design.md', line: 3, severity: 'low', summary: 's', failure_scenario: 'f' }] }) })
+    includes(d.labels, 'fix r1:docs'); notIncludes(d.labels, 'fix r1:backend')
+  }],
+  ['[routing] the longest matching path wins; a path matching nothing goes to the first of exec.components', 'dev-team', { profile: SHORT, exec: T2R({ components: ['backend', 'frontend'], state: reviewState(['backend', 'frontend']) }), reviews: byLens({ correctness: [{ file: '/home/dev/src/shop/web/src/a.ts', line: 2, severity: 'medium', summary: 's', failure_scenario: 'f' }] }) }, async (r) => {
+    includes(r.labels, 'fix r1:frontend'); notIncludes(r.labels, 'fix r1:backend')
+    const short = await runScenario(wf('dev-team'), { profile: SHORT, exec: T2R({ components: ['frontend', 'backend'], state: reviewState(['frontend', 'backend']) }), reviews: byLens({ correctness: [{ file: '/home/dev/src/shop/src/b.py', line: 2, severity: 'medium', summary: 's', failure_scenario: 'f' }] }) })
+    includes(short.labels, 'fix r1:backend'); notIncludes(short.labels, 'fix r1:frontend')
+    const none = (order) => runScenario(wf('dev-team'), { profile: profileWith({}), exec: T2R({ components: order, state: reviewState(order) }), reviews: byLens({ correctness: [{ file: '/opt/elsewhere/z.py', line: 1, severity: 'medium', summary: 's', failure_scenario: 'f' }] }) })
+    const fb = await none(['frontend', 'backend']); includes(fb.labels, 'fix r1:frontend'); notIncludes(fb.labels, 'fix r1:backend')
+    const bf = await none(['backend', 'frontend']); includes(bf.labels, 'fix r1:backend'); notIncludes(bf.labels, 'fix r1:frontend')
+  }],
+  ['[merge] two lenses on one file and line: one refutation, one fix item, one recheck, both summaries, highest severity', 'dev-team', { profile: profileWith({}), exec: T2R({ refute_votes_high: 3, state: reviewState(['backend']) }), reviews: byLens({ correctness: [{ file: 'backend/x.py', line: 7, severity: 'medium', summary: 'missing guard on the empty list', failure_scenario: 'f1' }], security: [{ file: 'backend/x.py', line: 7, severity: 'high', summary: 'unvalidated input reaches the query', failure_scenario: 'f2' }] }) }, async (r) => {
+    eq(r.result.status, 'stage-done')
+    eq(refuterLabels(r).join(','), 'verify:x.py v1,verify:x.py v2,verify:x.py v3')
+    for (const p of refuterPrompts(r)) { contains(p, 'missing guard on the empty list'); contains(p, 'unvalidated input reaches the query') }
+    const fix = promptOf(r, 'fix r1:backend')
+    contains(fix, 'missing guard on the empty list'); contains(fix, 'unvalidated input reaches the query'); contains(fix, 'f1'); contains(fix, 'f2')
+    eq(recheckLabels(r).join(','), 'recheck:x.py')
+    const [f] = fixFindings(r)
+    // The most severe copy leads, so the scenario the refuters and the recheck judge first is the one its severity comes from.
+    eq(fixFindings(r).length, 1); eq(f.severity, 'high'); eq(f.lens, 'correctness, security'); eq(f.summary, 'unvalidated input reaches the query'); eq(f.failure_scenario, 'f2')
+    deepEq(f.also_reported, [{ lens: 'correctness', severity: 'medium', summary: 'missing guard on the empty list', failure_scenario: 'f1' }])
+    const low = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: T2R({ refute_votes_high: 3, state: reviewState(['backend']) }), reviews: byLens({ correctness: [{ file: 'backend/x.py', line: 7, severity: 'medium', summary: 'a', failure_scenario: 'f1' }], 'stack:python': [{ file: 'backend/x.py', line: 7, severity: 'low', summary: 'b', failure_scenario: 'f2' }] }) })
+    eq(refuterLabels(low).join(','), 'verify:x.py'); eq(fixFindings(low)[0].severity, 'medium'); eq(fixFindings(low)[0].lens, 'correctness, python')
+    const single = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: T2R({ state: reviewState(['backend']) }), reviews: byLens({ correctness: [{ file: 'backend/x.py', line: 7, severity: 'medium', summary: 'a', failure_scenario: 'f1' }] }) })
+    eq(Object.keys(fixFindings(single)[0]).includes('also_reported'), false)
+  }],
+  ['[merge] absolute and relative spellings merge; two lines stay apart; no-line findings keep the old rule', 'dev-team', { profile: profileWith({}), exec: T2R({ state: reviewState(['backend']) }), reviews: byLens({ correctness: [{ file: 'backend/x.py', line: 7, severity: 'medium', summary: 'a', failure_scenario: 'f1' }], security: [{ file: '/home/dev/shop/backend/x.py', line: 7, severity: 'medium', summary: 'b', failure_scenario: 'f2' }] }) }, async (r) => {
+    eq(refuterLabels(r).join(','), 'verify:x.py'); eq(fixFindings(r).length, 1); eq(fixFindings(r)[0].file, 'backend/x.py')
+    const go = (table) => runScenario(wf('dev-team'), { profile: profileWith({}), exec: T2R({ state: reviewState(['backend']) }), reviews: byLens(table) })
+    const lines = await go({ correctness: [{ file: 'backend/x.py', line: 10, severity: 'medium', summary: 'a', failure_scenario: 'f' }], security: [{ file: 'backend/x.py', line: 11, severity: 'medium', summary: 'a', failure_scenario: 'f' }] })
+    eq(refuterLabels(lines).length, 2); eq(fixFindings(lines).length, 2); eq(recheckLabels(lines).length, 2)
+    const prefix = 'the handler never closes the session when'
+    const same = await go({ correctness: [{ file: 'backend/x.py', severity: 'medium', summary: `${prefix} the request fails`, failure_scenario: 'f' }], security: [{ file: 'backend/x.py', severity: 'medium', summary: `${prefix} the client hangs up`, failure_scenario: 'f' }] })
+    eq(refuterLabels(same).length, 1); eq(fixFindings(same)[0].summary, `${prefix} the request fails`)
+    deepEq(fixFindings(same)[0].also_reported, [{ lens: 'security', severity: 'medium', summary: `${prefix} the client hangs up`, failure_scenario: 'f' }])
+    const differ = await go({ correctness: [{ file: 'backend/x.py', severity: 'medium', summary: 'one thing', failure_scenario: 'f' }], security: [{ file: 'backend/x.py', severity: 'medium', summary: 'another thing', failure_scenario: 'f' }] })
+    eq(refuterLabels(differ).length, 2)
+    const spelled = await go({ correctness: [{ file: 'backend/x.py', severity: 'medium', summary: 'one thing', failure_scenario: 'f' }], security: [{ file: '/home/dev/shop/backend/x.py', severity: 'medium', summary: 'one thing', failure_scenario: 'f' }] })
+    eq(refuterLabels(spelled).length, 2)
+    // A short component path that also occurs in the directories above the repository.
+    const twice = await runScenario(wf('dev-team'), { profile: SHORT, exec: T2R({ state: reviewState(['backend']) }), reviews: byLens({ correctness: [{ file: 'src/b.py', line: 2, severity: 'medium', summary: 'a', failure_scenario: 'f' }], security: [{ file: '/home/dev/src/shop/src/b.py', line: 2, severity: 'medium', summary: 'b', failure_scenario: 'f' }] }) })
+    eq(refuterLabels(twice).length, 1); eq(fixFindings(twice)[0].lens, 'correctness, security')
+  }],
+  ['[merge] review-team: each confirmed and each refuted finding once, with its lenses', 'review-team', { profile: profileWith({}), exec: { base: 'origin/main', lenses: ['correctness', 'security'], components: ['backend'], plugin_root: '/plug' }, reviews: byLens({ correctness: [{ file: 'backend/x.py', line: 7, severity: 'low', summary: 'a', failure_scenario: 'f1' }], security: [{ file: '/home/dev/shop/backend/x.py', line: 7, severity: 'medium', summary: 'b', failure_scenario: 'f2' }] }) }, async (r) => {
+    eq(r.result.status, 'not-ready'); eq(r.result.confirmed.length, 1); eq(r.result.refuted.length, 0); eq(refuterLabels(r).length, 1)
+    const [c] = r.result.confirmed
+    eq(c.lens, 'correctness, security'); eq(c.severity, 'medium'); eq(c.summary, 'b'); eq(c.file, 'backend/x.py'); deepEq(c.also_reported, [{ lens: 'correctness', severity: 'low', summary: 'a', failure_scenario: 'f1' }])
+    const ref = await runScenario(wf('review-team'), { profile: profileWith({}), exec: { base: 'origin/main', lenses: ['correctness', 'security'], components: ['backend'], plugin_root: '/plug' }, refuteAll: true, reviews: byLens({ correctness: [{ file: 'backend/x.py', line: 7, severity: 'low', summary: 'a', failure_scenario: 'f1' }], security: [{ file: 'backend/x.py', line: 7, severity: 'low', summary: 'b', failure_scenario: 'f2' }] }) })
+    eq(ref.result.status, 'accepted'); eq(ref.result.refuted.length, 1); eq(ref.result.confirmed.length, 0); eq(ref.result.refuted[0].lens, 'correctness, security')
+  }],
+  ['[merge] the path reduction and merge code is the same text in both scripts', 'review-team', { profile: profileWith({}), exec: { base: 'origin/main', lenses: ['correctness'], components: ['backend'], plugin_root: '/plug' }, cleanReview: true }, () => {
+    const d = sharedBlock('dev-team')
+    eq(sharedBlock('review-team'), d); contains(d, 'const repoPath ='); contains(d, 'const mergeFindings =')
+  }],
+  ['[docs] an audit that returns nothing is reported as not audited, and QA still runs', 'dev-team', { profile: profileWith({}), exec: { ...T2, skip: ['pm', 'architect', 'consult', 'crosscheck'] }, cleanReview: true, auditNothing: true }, (r) => {
+    eq(r.result.status, 'accepted'); includes(r.labels, 'docs:audit'); includes(r.labels, 'qa'); notIncludes(r.labels, 'docs:fix')
+    eq(r.result.docs.audited, false); eq(r.result.summary.docs_audited, false); eq(r.result.state.docs.audited, false)
+    const slice = r.result.commit_plan.find((s) => s.title.startsWith('docs:'))
+    eq(slice.rationale, 'docs writer, not audited')
+  }],
+  ['[docs] an audit that returns a list, empty or not, is reported as audited', 'dev-team', { profile: profileWith({}), exec: { ...T2, skip: ['pm', 'architect', 'consult', 'crosscheck'] }, cleanReview: true, auditEmpty: true }, async (r) => {
+    eq(r.result.status, 'accepted'); notIncludes(r.labels, 'docs:fix')
+    eq(r.result.docs.audited, true); eq(r.result.summary.docs_audited, true)
+    eq(r.result.commit_plan.find((s) => s.title.startsWith('docs:')).rationale, 'docs writer, audited')
+    const fixed = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T2, skip: ['pm', 'architect', 'consult', 'crosscheck'] }, cleanReview: true })
+    includes(fixed.labels, 'docs:fix'); eq(fixed.result.docs.audited, true); eq(fixed.result.summary.docs_audited, true)
+    eq(fixed.result.commit_plan.find((s) => s.title.startsWith('docs:')).rationale, 'docs writer, audited')
+  }],
+  ['[scope] exec.lead_files are allowed in the build, review and finish stages and named to QA', 'dev-team', { profile: profileWith({}), exec: { ...T2, stage: 'build', lead_files: LEAD }, changed: CHANGED }, async (r) => {
+    eq(r.result.status, 'stage-done'); eq(r.labels.some((l) => l.includes('-scope')), false)
+    contains(promptOf(r, 'verify:build'), "'.gitignore' 'docs/plans/'")
+    const v = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T2, stage: 'review', lead_files: LEAD, state: r.result.state }, changed: CHANGED })
+    eq(v.result.status, 'stage-done'); includes(v.labels, 'verify:fix r1'); eq(v.labels.some((l) => l.includes('-scope')), false)
+    const f = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T2, stage: 'finish', lead_files: LEAD, state: v.result.state }, changed: CHANGED, teBugs: true })
+    eq(f.result.status, 'accepted'); includes(f.labels, 'verify:tests'); eq(f.labels.some((l) => l.includes('-scope')), false)
+    const qa = promptOf(f, 'qa')
+    matches(qa, /Allowed paths for the scope gate: .*\.gitignore docs\/plans\//); contains(qa, 'the lead changed .gitignore docs/plans/ itself')
+  }],
+  ['[scope] without exec.lead_files the same files are out of scope in every stage', 'dev-team', { profile: profileWith({}), exec: { ...T2, stage: 'build' }, changed: CHANGED }, async (r) => {
+    includes(r.labels, 'verify:build-scope:backend'); includes(r.labels, 'verify:build-scope:docs')
+    contains(promptOf(r, 'verify:build-scope:backend'), 'edited outside the allowed paths: .gitignore')
+    const v = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T2, stage: 'review', state: r.result.state }, changed: CHANGED })
+    includes(v.labels, 'verify:fix r1-scope:backend')
+    const f = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T2, stage: 'finish', state: v.result.state }, changed: CHANGED, teBugs: true })
+    includes(f.labels, 'verify:tests-scope:backend'); lacks(promptOf(f, 'qa'), '.gitignore'); lacks(promptOf(f, 'qa'), 'the lead changed')
+  }],
+  ['[scope] a file outside every allowed path and not in exec.lead_files is still sent back', 'dev-team', { profile: profileWith({}), exec: { ...T2, stage: 'build', lead_files: LEAD }, changed: [...CHANGED, 'Makefile'] }, (r) => {
+    includes(r.labels, 'verify:build-scope:backend'); notIncludes(r.labels, 'verify:build-scope:docs')
+    const p = promptOf(r, 'verify:build-scope:backend')
+    contains(p, 'edited outside the allowed paths: Makefile'); lacks(p, 'outside the allowed paths: .gitignore')
+  }],
+  // Challenger: the refuter's rule is "the finding stands only if the failure scenario is
+  // reachable", and the recheck asks whether "the failure scenario is no longer reachable".
+  // A merged finding takes the highest severity, so it must also show the scenario that
+  // severity belongs to; otherwise a high copy is judged and rechecked on a lower copy's scenario.
+  ['[merge] a merged finding shows the refuter, the fix and the recheck the scenario of every copy', 'dev-team', { profile: profileWith({}), exec: T2R({ refute_votes_high: 3, state: reviewState(['backend']) }), reviews: byLens({ correctness: [{ file: 'backend/x.py', line: 7, severity: 'low', summary: 'naming is unclear', failure_scenario: 'LOW-SCENARIO a reader misreads the name' }], security: [{ file: 'backend/x.py', line: 7, severity: 'high', summary: 'unvalidated input reaches the query', failure_scenario: 'HIGH-SCENARIO a crafted id drops the table', suggested_fix: 'HIGH-FIX bind the parameter' }] }) }, (r) => {
+    eq(refuterLabels(r).join(','), 'verify:x.py v1,verify:x.py v2,verify:x.py v3')
+    for (const p of refuterPrompts(r)) contains(p, 'HIGH-SCENARIO a crafted id drops the table')
+    contains(promptOf(r, 'fix r1:backend'), 'HIGH-SCENARIO a crafted id drops the table')
+    contains(promptOf(r, 'fix r1:backend'), 'HIGH-FIX bind the parameter')
+    const recheck = r.calls.find((c) => c.label.startsWith('recheck:'))
+    contains(recheck.prompt, 'HIGH-SCENARIO a crafted id drops the table')
+  }],
+  // Challenger: a lead that writes one file as a string must not have that file sent to a dev
+  // as "edited outside the allowed paths ... Revert it": either it is taken as one path, or
+  // the run stops before any dev is told to revert it.
+  ['[scope] exec.lead_files written as one string never sends the lead\'s file to a dev to revert', 'dev-team', { profile: profileWith({}), exec: { ...T2, stage: 'build', lead_files: '.gitignore' }, changed: ['backend/x.py', '.gitignore'] }, (r) => {
+    eq(r.labels.some((l) => l.includes('-scope')), false)
+  }],
+  ['[scope] exec.lead_files as one string is one allowed path; a value that is not a path or a list of paths stops the launch', 'dev-team', { profile: profileWith({}), exec: { ...T2, stage: 'build', lead_files: '.gitignore' }, changed: ['backend/x.py', '.gitignore', 'Makefile'] }, async (r) => {
+    eq(r.result.status, 'stage-done'); contains(promptOf(r, 'verify:build'), "'.gitignore'")
+    const p = promptOf(r, 'verify:build-scope:backend')
+    contains(p, 'edited outside the allowed paths: Makefile'); lacks(p, 'outside the allowed paths: .gitignore')
+    for (const bad of [42, { path: '.gitignore' }, ['.gitignore', 7]]) {
+      const err = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T2, stage: 'build', lead_files: bad }, changed: ['backend/x.py'] }).then(() => null, (e) => e)
+      if (!err) throw new Error(`expected exec.lead_files ${JSON.stringify(bad)} to stop the launch`)
+      matches(err.message, /exec\.lead_files must be a path or a list of paths/)
+    }
+  }],
+  ['[merge] the most severe copy leads wherever it was reported, and every other copy keeps its scenario and fix', 'dev-team', { profile: profileWith({}), exec: T2R({ state: reviewState(['backend']) }), reviews: byLens({ correctness: [{ file: 'backend/x.py', line: 7, severity: 'low', summary: 'a', failure_scenario: 'fa', suggested_fix: 'FIX-A' }], security: [{ file: '/home/dev/shop/backend/x.py', line: 7, severity: 'high', summary: 'b', failure_scenario: 'fb' }], 'stack:python': [{ file: 'backend/x.py', line: 7, severity: 'high', summary: 'c', failure_scenario: 'fc' }] }) }, (r) => {
+    const [f] = fixFindings(r)
+    eq(fixFindings(r).length, 1); eq(f.summary, 'b'); eq(f.severity, 'high'); eq(f.file, 'backend/x.py'); eq(f.lens, 'correctness, security, python')
+    deepEq(f.also_reported, [
+      { lens: 'correctness', severity: 'low', summary: 'a', failure_scenario: 'fa', suggested_fix: 'FIX-A' },
+      { lens: 'python', severity: 'high', summary: 'c', failure_scenario: 'fc' },
+    ])
+    contains(promptOf(r, 'fix r1:backend'), 'FIX-A')
+  }],
+  // Reviewer: an exact file path in the profile (Dockerfile, README.md) is also the name of a
+  // file inside a component; it must not take a component's file away from its dev.
+  ['[routing] a component\'s Dockerfile or README.md goes to the component; the root ones go to devops and docs', 'dev-team', { profile: profileWith({}), exec: T2R({ components: ['backend', 'frontend'], state: reviewState(['backend', 'frontend']) }), reviews: byLens({ correctness: [{ file: '/srv/shop/backend/Dockerfile', line: 3, severity: 'medium', summary: 's', failure_scenario: 'f' }], security: [{ file: '/srv/shop/frontend/README.md', line: 5, severity: 'medium', summary: 's', failure_scenario: 'f' }] }) }, async (r) => {
+    includes(r.labels, 'fix r1:backend'); includes(r.labels, 'fix r1:frontend'); notIncludes(r.labels, 'fix r1:devops'); notIncludes(r.labels, 'fix r1:docs')
+    contains(promptOf(r, 'fix r1:backend'), '/srv/shop/backend/Dockerfile'); contains(promptOf(r, 'fix r1:frontend'), '/srv/shop/frontend/README.md')
+    const root = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: T2R({ components: ['backend', 'frontend'], state: reviewState(['backend', 'frontend']) }), reviews: byLens({ correctness: [{ file: '/srv/shop/Dockerfile', line: 3, severity: 'medium', summary: 's', failure_scenario: 'f' }], security: [{ file: '/srv/shop/README.md', line: 5, severity: 'medium', summary: 's', failure_scenario: 'f' }] }) })
+    includes(root.labels, 'fix r1:devops'); includes(root.labels, 'fix r1:docs'); notIncludes(root.labels, 'fix r1:backend'); notIncludes(root.labels, 'fix r1:frontend')
+  }],
+  ['[merge] the root Dockerfile and a component\'s Dockerfile at the same line are two findings', 'dev-team', { profile: profileWith({}), exec: T2R({ components: ['backend', 'frontend'], state: reviewState(['backend', 'frontend']) }), reviews: byLens({ correctness: [{ file: 'Dockerfile', line: 3, severity: 'medium', summary: 'root image runs as root', failure_scenario: 'f1' }], security: [{ file: '/srv/shop/backend/Dockerfile', line: 3, severity: 'medium', summary: 'backend image pins no digest', failure_scenario: 'f2' }] }) }, (r) => {
+    eq(refuterLabels(r).length, 2); eq(fixFindings(r).length, 2); eq(recheckLabels(r).length, 2)
+    eq(fixFindings(r).some((f) => 'also_reported' in f), false)
+    contains(promptOf(r, 'fix r1:devops'), 'root image runs as root'); lacks(promptOf(r, 'fix r1:devops'), 'backend image pins no digest')
+    contains(promptOf(r, 'fix r1:backend'), 'backend image pins no digest'); lacks(promptOf(r, 'fix r1:backend'), 'root image runs as root')
+  }],
+  // Reviewer: where the cut is a guess, the merged finding must still name a file a reviewer
+  // wrote, so the refuter, the fix and the recheck read the right one.
+  ['[merge] a merged finding names a file a reviewer wrote: the relative spelling, else the leading copy\'s own', 'dev-team', { profile: profileWith({}), exec: T2R({ state: reviewState(['backend']) }), reviews: byLens({ correctness: [{ file: '/srv/shop/backend/backend/settings.py', line: 10, severity: 'medium', summary: 'a', failure_scenario: 'f1' }], security: [{ file: '/srv/shop/backend/backend/settings.py', line: 10, severity: 'high', summary: 'b', failure_scenario: 'f2' }] }) }, async (r) => {
+    eq(refuterLabels(r).length, 1); eq(fixFindings(r).length, 1); includes(r.labels, 'fix r1:backend')
+    const [f] = fixFindings(r)
+    eq(f.file, '/srv/shop/backend/backend/settings.py'); eq(f.summary, 'b')
+    deepEq(f.also_reported, [{ lens: 'correctness', severity: 'medium', summary: 'a', failure_scenario: 'f1' }])
+    for (const p of refuterPrompts(r)) lacks(p, '"file": "backend/settings.py"')
+    const mixed = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: T2R({ state: reviewState(['backend']) }), reviews: byLens({ correctness: [{ file: 'backend/x.py', line: 7, severity: 'low', summary: 'a', failure_scenario: 'f1' }], security: [{ file: '/srv/shop/backend/x.py', line: 7, severity: 'high', summary: 'b', failure_scenario: 'f2' }] }) })
+    const [m] = fixFindings(mixed)
+    eq(m.file, 'backend/x.py'); eq(m.summary, 'b')
+    deepEq(m.also_reported, [{ lens: 'correctness', severity: 'low', summary: 'a', failure_scenario: 'f1' }])
+    const led = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: T2R({ state: reviewState(['backend']) }), reviews: byLens({ correctness: [{ file: 'backend/x.py', line: 7, severity: 'high', summary: 'a', failure_scenario: 'f1' }], security: [{ file: '/srv/shop/backend/x.py', line: 7, severity: 'low', summary: 'b', failure_scenario: 'f2' }] }) })
+    deepEq(fixFindings(led)[0].also_reported, [{ lens: 'security', severity: 'low', summary: 'b', failure_scenario: 'f2', file: '/srv/shop/backend/x.py' }])
+  }],
+  ['[merge] review-team routes nothing but shows the same merged file and locations', 'review-team', { profile: profileWith({}), exec: { base: 'origin/main', lenses: ['correctness', 'security'], components: ['backend', 'frontend'], plugin_root: '/plug' }, reviews: byLens({ correctness: [{ file: 'Dockerfile', line: 3, severity: 'medium', summary: 'a', failure_scenario: 'f1' }, { file: '/srv/shop/backend/backend/settings.py', line: 10, severity: 'low', summary: 'c', failure_scenario: 'f3' }], security: [{ file: '/srv/shop/backend/Dockerfile', line: 3, severity: 'medium', summary: 'b', failure_scenario: 'f2' }, { file: '/srv/shop/backend/backend/settings.py', line: 10, severity: 'medium', summary: 'd', failure_scenario: 'f4' }] }) }, (r) => {
+    eq(r.result.confirmed.length, 3); eq(refuterLabels(r).length, 3)
+    deepEq(r.result.confirmed.map((c) => c.file).sort(), ['/srv/shop/backend/Dockerfile', '/srv/shop/backend/backend/settings.py', 'Dockerfile'])
+    eq(r.result.confirmed.find((c) => c.summary === 'd').lens, 'correctness, security')
+  }],
+
+  // ---- test engineer: review cost, gaps the dev scenarios leave open -----------------------
+  // The state a review stop actually leaves (fixed: false, recheck_reason) is the state the
+  // lead relaunches with; the open findings must be judged again from it, without those fields.
+  ['te: [resume] a review stopped with open findings, relaunched with its own state, judges them again', 'dev-team', { profile: profileWith({}), exec: T2R({ state: reviewState(['backend']) }), reviews: byLens({ correctness: [{ file: 'backend/a.py', line: 4, severity: 'medium', summary: 'still open after the fix', failure_scenario: 'f1' }] }), notFixed: true }, async (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.result.state.unresolved.length, 1); eq(r.result.state.unresolved[0].fixed, false)
+    const again = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: T2R({ state: r.result.state }), reviews: () => [] })
+    eq(again.result.status, 'stage-done'); eq(again.result.state.reviewClean, true); deepEq(again.result.state.unresolved, [])
+    eq(refuterLabels(again).join(','), 'verify:a.py')
+    const p = refuterPrompts(again)[0]
+    contains(p, 'still open after the fix'); lacks(p, '"fixed"'); lacks(p, '"recheck_reason"'); lacks(p, '"verdict_reason"'); lacks(p, '"refuted"')
+    includes(again.labels, 'fix r1:backend'); eq(recheckLabels(again).join(','), 'recheck:a.py')
+  }],
+  ['te: [resume] escalations and open findings are both judged in round 1, and one at the same line is judged once', 'dev-team', { profile: profileWith({}), exec: T2R({ refute_votes_high: 3, state: reviewState(['backend'], { unresolved: OPEN, escalated: [{ file: 'backend/a.py', line: 4, severity: 'high', summary: 'challenger escalation', failure_scenario: 'esc', lens: 'backend-challenge' }, { file: 'backend/c.py', line: 2, severity: 'medium', summary: 'other escalation', failure_scenario: 'esc2', lens: 'backend-challenge' }] }) }), reviews: () => [] }, (r) => {
+    eq(r.result.status, 'stage-done'); deepEq(r.result.state.escalated, [])
+    // a.py:4 is one defect (escalation high + open medium): three votes; b.py and c.py one each.
+    eq(refuterLabels(r).sort().join(','), 'verify:a.py v1,verify:a.py v2,verify:a.py v3,verify:b.py,verify:c.py')
+    const a = fixFindings(r).find((f) => f.file === 'backend/a.py')
+    eq(fixFindings(r).length, 3); eq(a.severity, 'high'); eq(a.summary, 'challenger escalation'); eq(a.lens.split(', ').sort().join(', '), 'backend-challenge, correctness')
+    deepEq(a.also_reported, [{ lens: 'correctness', severity: 'medium', summary: 'open one', failure_scenario: 'f1' }])
+    eq(recheckLabels(r).length, 3)
+  }],
+  ['te: [resume] open findings the refuters now reject leave the review clean with no fix', 'dev-team', { profile: profileWith({}), exec: T2R({ state: reviewState(['backend'], { unresolved: OPEN }) }), reviews: () => [], refuteAll: true }, (r) => {
+    eq(r.result.status, 'stage-done'); eq(r.result.state.reviewClean, true); deepEq(r.result.state.unresolved, [])
+    eq(refuterLabels(r).length, 2); eq(r.labels.some((l) => l.startsWith('fix r')), false); eq(recheckLabels(r).length, 0)
+  }],
+  // An open finding that was already a merge keeps its lenses once and every copy when a lens
+  // it already names reports it again.
+  ['te: [resume] a merged open finding reported again keeps each lens once and every copy', 'dev-team', { profile: profileWith({}), exec: T2R({ state: reviewState(['backend'], { unresolved: [{ file: 'backend/x.py', line: 7, severity: 'medium', summary: 'first', failure_scenario: 'f1', lens: 'correctness, security', also_reported: [{ lens: 'security', severity: 'low', summary: 'second', failure_scenario: 'f2' }], refuted: false, verdict_reason: 'OLD-V', fixed: false, recheck_reason: 'OLD-R' }] }) }), reviews: byLens({ security: [{ file: '/srv/shop/backend/x.py', line: 7, severity: 'low', summary: 'third', failure_scenario: 'f3' }] }) }, (r) => {
+    eq(refuterLabels(r).join(','), 'verify:x.py')
+    const [f] = fixFindings(r)
+    eq(fixFindings(r).length, 1); eq(f.lens, 'correctness, security'); eq(f.file, 'backend/x.py'); eq(f.summary, 'first')
+    deepEq(f.also_reported, [{ lens: 'security', severity: 'low', summary: 'second', failure_scenario: 'f2' }, { lens: 'security', severity: 'low', summary: 'third', failure_scenario: 'f3', file: '/srv/shop/backend/x.py' }])
+    lacks(promptOf(r, 'fix r1:backend'), 'OLD-')
+  }],
+  // Line 0 is "no line": the old rule (file and first 40 characters of the summary) applies.
+  ['te: [merge] line 0 is treated as no line', 'dev-team', { profile: profileWith({}), exec: T2R({ state: reviewState(['backend']) }), reviews: byLens({ correctness: [{ file: 'backend/x.py', line: 0, severity: 'medium', summary: 'one thing', failure_scenario: 'f' }], security: [{ file: 'backend/x.py', line: 0, severity: 'medium', summary: 'another thing', failure_scenario: 'f' }] }) }, async (r) => {
+    eq(refuterLabels(r).length, 2); eq(fixFindings(r).length, 2)
+    const same = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: T2R({ state: reviewState(['backend']) }), reviews: byLens({ correctness: [{ file: 'backend/x.py', line: 0, severity: 'medium', summary: 'one thing', failure_scenario: 'f' }], security: [{ file: 'backend/x.py', severity: 'medium', summary: 'one thing', failure_scenario: 'g' }] }) })
+    eq(refuterLabels(same).length, 1); eq(fixFindings(same)[0].lens, 'correctness, security')
+  }],
+  ['te: [merge] review-team gives a merged finding with a high copy refute_votes_high votes', 'review-team', { profile: profileWith({}), exec: { base: 'origin/main', lenses: ['correctness', 'security'], components: ['backend'], refute_votes_high: 3, plugin_root: '/plug' }, reviews: byLens({ correctness: [{ file: 'backend/x.py', line: 7, severity: 'low', summary: 'a', failure_scenario: 'f1' }], security: [{ file: '/srv/shop/backend/x.py', line: 7, severity: 'high', summary: 'b', failure_scenario: 'f2' }] }) }, (r) => {
+    eq(refuterLabels(r).join(','), 'verify:x.py v1,verify:x.py v2,verify:x.py v3')
+    for (const p of refuterPrompts(r)) { contains(p, 'f1'); contains(p, 'f2') }
+    eq(r.result.confirmed.length, 1); eq(r.result.confirmed[0].severity, 'high'); eq(r.result.confirmed[0].file, 'backend/x.py')
+  }],
+  // exec.lead_files is passed on every launch and never saved in state: a later launch without
+  // it treats the same files as out of scope again.
+  ['te: [scope] exec.lead_files is not saved in state: a later launch without it sends the files back', 'dev-team', { profile: profileWith({}), exec: { ...T2, stage: 'build', lead_files: LEAD }, changed: CHANGED }, async (r) => {
+    eq(r.result.status, 'stage-done'); eq(JSON.stringify(r.result.state).includes('lead_files'), false); eq(JSON.stringify(r.result.state).includes('.gitignore'), false)
+    const v = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T2, stage: 'review', state: r.result.state }, changed: CHANGED })
+    includes(v.labels, 'verify:fix r1-scope:backend'); contains(promptOf(v, 'verify:fix r1-scope:backend'), 'edited outside the allowed paths: .gitignore')
+  }],
+  ['te: [scope] an empty exec.lead_files list behaves as if absent', 'dev-team', { profile: profileWith({}), exec: { ...T2, stage: 'build', lead_files: [] }, changed: CHANGED }, (r) => {
+    eq(r.result.status, 'stage-done'); includes(r.labels, 'verify:build-scope:backend')
+    contains(promptOf(r, 'verify:build-scope:backend'), 'edited outside the allowed paths: .gitignore')
+  }],
+  // No audit was due (docs skipped): docs_audited is neither true nor false.
+  ['te: [docs] with no docs pass, the summary does not claim an audit either way', 'dev-team', { profile: profileWith({}), exec: T2, cleanReview: true }, (r) => {
+    eq(r.result.status, 'accepted'); notIncludes(r.labels, 'docs:audit'); eq(r.result.summary.docs_audited, null)
+    eq(r.result.commit_plan.some((s) => s.title.startsWith('docs:')), false)
+  }],
+  // A finish relaunch after an unaudited docs pass keeps reporting it as not audited.
+  ['te: [docs] not audited survives in state for the lead to see', 'dev-team', { profile: profileWith({}), exec: { ...T2, stage: 'finish', skip: ['pm', 'architect', 'consult', 'crosscheck'], state: reviewState(['backend'], { reviewClean: true }) }, auditNothing: true }, (r) => {
+    eq(r.result.status, 'accepted'); includes(r.labels, 'qa'); eq(r.result.state.docs.audited, false); eq(r.result.summary.docs_audited, false)
+    eq(r.result.commit_plan.find((s) => s.title.startsWith('docs:')).rationale, 'docs writer, not audited')
   }],
 ]
 

@@ -6,7 +6,9 @@
 //                      exec: { base, lenses, components, refute_votes_high, plugin_root, task? } } })
 //
 // Lenses: correctness, security, conventions, stack (one reviewer-stack per distinct stack
-// among the components), ux (only when a touched component has ui: true).
+// among the components), ux (only when a touched component has ui: true). Findings that
+// several lenses report at the same file and line are merged and judged once; confirmed
+// and refuted hold the merged findings (lens lists every lens, also_reported the others).
 
 export const meta = {
   name: 'review-team',
@@ -88,15 +90,82 @@ async function run(role, prompt, opts) {
     return fromBrief()
   }
 }
-const dedupe = (items) => {
-  const seen = new Set()
-  return items.filter((f) => {
-    const key = `${f.file}:${f.line || 0}:${(f.summary || '').slice(0, 40)}`
-    if (seen.has(key)) return false
-    seen.add(key)
-    return true
+// ---- findings: path reduction and merge (the same text in dev-team.js and review-team.js) ----
+// repoPath: reviewers write a finding's file relative or absolute, and the scripts cannot
+// see the file system, so an absolute path keeps its tail from the `/` before one of the
+// profile's component, test, docs or devops paths. A directory or glob path wins over an
+// exact file path (Dockerfile, README.md), which also names files inside the components;
+// then the longest path wins; for one path, its last place in the file. A relative path,
+// or one matching no path, is unchanged. It routes fixes and keys the merge; the file
+// shown to the refuter, the fix and the recheck is always one a reviewer wrote.
+// Known limits: without the repository root the place of the cut is a guess, and the same
+// shape reads both ways. It goes wrong when a directory above the repository is named like
+// a longer profile path (repository at /srv/backend/, paths app/ and backend/:
+// /srv/backend/app/x.py gives backend/app/x.py), when a directory inside a component is
+// named like that component (/srv/shop/backend/backend/settings.py gives
+// backend/settings.py, which /srv/requests/requests/api.py needs), or like a longer
+// profile path (app/ and tests/: /srv/shop/app/tests/t.py gives tests/t.py, which
+// /srv/src/shop/frontend/x.ts needs with src/). Then the fix may go to the wrong owner and
+// a relative copy of the same defect is judged apart.
+// mergeFindings judges one defect once: findings with a line are grouped by repository
+// path and line, findings without one by file and the first 40 characters of the summary.
+// A group is shown through its most severe copy (the first one on a tie), every lens
+// joined, and each other copy under also_reported ({ lens, severity, summary,
+// failure_scenario, suggested_fix when given, file when spelled differently }), so the
+// refuter, the fix and the recheck read every copy's scenario and location. Its file is a
+// relative spelling from the group when there is one, otherwise the leading copy's own.
+const globToRe = (g) => new RegExp('^' + g.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*\//g, '(.*/)?').replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$')
+const matches = (file, pattern) => pattern.endsWith('/') ? file.startsWith(pattern) : (pattern.includes('*') || pattern.includes('?')) ? globToRe(pattern).test(file) : file === pattern
+const profilePaths = () => [
+  ...(profile.components || []).flatMap((c) => [...(c.paths || []), ...(c.tests || [])]),
+  ...((profile.docs || {}).paths || []),
+  ...((profile.devops || {}).paths || []),
+].filter((p) => typeof p === 'string')
+const repoPath = (file) => {
+  if (typeof file !== 'string' || !file.startsWith('/')) return file
+  let best = null
+  for (const p of profilePaths()) {
+    const lead = p.split(/[*?]/)[0]
+    if (!lead) continue
+    const kind = lead === p && !p.endsWith('/') ? 0 : 1
+    const needle = `/${lead}`
+    for (let at = file.lastIndexOf(needle); at >= 0; at = at > 0 ? file.lastIndexOf(needle, at - 1) : -1) {
+      const tail = file.slice(at + 1)
+      if (!matches(tail, p)) continue
+      const better = !best || kind > best.kind || (kind === best.kind && (lead.length > best.lead.length || (lead.length === best.lead.length && at > best.at)))
+      if (better) best = { kind, lead, at, tail }
+      break
+    }
+  }
+  return best ? best.tail : file
+}
+const SEVERITY_RANK = { low: 1, medium: 2, high: 3 }
+const lensesOf = (f) => String(f.lens || '').split(', ').filter(Boolean)
+const reportOf = (f, file) => ({
+  lens: f.lens, severity: f.severity, summary: f.summary, failure_scenario: f.failure_scenario,
+  ...(f.suggested_fix ? { suggested_fix: f.suggested_fix } : {}),
+  ...(f.file !== file ? { file: f.file } : {}),
+})
+const mergeFindings = (items) => {
+  const groups = new Map()
+  for (const f of items) {
+    const key = f.line > 0 ? JSON.stringify(['line', repoPath(f.file), f.line]) : JSON.stringify(['text', f.file, f.line || 0, (f.summary || '').slice(0, 40)])
+    groups.set(key, [...(groups.get(key) || []), f])
+  }
+  return [...groups.values()].map((all) => {
+    if (all.length === 1) return all[0]
+    const top = all.reduce((t, f) => ((SEVERITY_RANK[f.severity] || 0) > (SEVERITY_RANK[t.severity] || 0) ? f : t), all[0])
+    const relative = all.find((f) => typeof f.file === 'string' && !f.file.startsWith('/'))
+    const file = relative ? relative.file : top.file
+    return {
+      ...top,
+      file,
+      lens: [...new Set(all.flatMap(lensesOf))].join(', '),
+      also_reported: [...(top.also_reported || []), ...all.filter((f) => f !== top).flatMap((f) => [reportOf(f, file), ...(f.also_reported || [])])],
+    }
   })
 }
+// ---- end of the shared findings block ----
 
 // ---- Profile ---------------------------------------------------------------
 if (!profile) {
@@ -141,8 +210,8 @@ const reviewPrompt = (extra) =>
 const raw = (await parallel(lensRoles.map((l) => () =>
   run(l.role, reviewPrompt(l.stack ? `Your lens is the ${l.stack} stack: load conclave:stack-${l.stack} with the Skill tool first and apply its review checklist. ` : ''), { phase: 'Review', schema: FINDINGS, label: `review:${l.stack ? `stack:${l.stack}` : l.role.replace('reviewer-', '')}` })
     .then((res) => (res ? res.findings.map((f) => ({ ...f, lens: l.stack || l.role.replace('reviewer-', '') })) : []))))).filter(Boolean).flat()
-const fresh = dedupe(raw)
-log(`review: ${raw.length} finding(s), ${fresh.length} after dedup`)
+const fresh = mergeFindings(raw)
+log(`review: ${raw.length} finding(s), ${fresh.length} after merging`)
 
 // ---- Verify ----------------------------------------------------------------
 let confirmed = []

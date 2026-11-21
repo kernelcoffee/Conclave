@@ -230,7 +230,12 @@
         "plans": {
           "type": "string",
           "default": "docs/plans/",
-          "description": "Directory for per-task plan documents, committed with the change."
+          "description": "Directory for per-task plan documents; working documents, ignored by git unless `commit_plans` is true."
+        },
+        "commit_plans": {
+          "type": "boolean",
+          "default": false,
+          "description": "Commit plan documents with the change: the lead puts the plan document in the first commit slice and does not add the plans directory to .gitignore. Off by default because a plan is the working document of one task."
         }
       }
     },

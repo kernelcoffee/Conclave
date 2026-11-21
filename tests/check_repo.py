@@ -22,6 +22,20 @@
 - the replaced step wording (`analysis confirmed by the user`, the n/a mark) appears in no
   file that describes the step; the Proposed model placeholder points at the Current state
   diagram under Analysis; the template and the lead name the same Status values;
+- plan documents stay local by default: the schema declares `docs.commit_plans` as a boolean
+  with default `false` and a description, the lead names `commit_plans`, and no statement that
+  made a plan a committed file remains in the lead, the plan template, the init skill or the
+  schema; the check is first run on known-bad variants as well;
+- lead.md step 2 adds both ignore lines, ignores only plan-named files in a plans directory
+  that tracks other documents, gives the one-time notice, never untracks, and keeps
+  `.gitignore` in `exec.lead_files` while it differs from the base; its Commit proposal puts
+  the lead's own files in a slice of their own and the plan document in none by default;
+- the lead lets a request in the task commit the plan without changing the profile and sets
+  Status `done` in the local document; /conclave:plan step 3 names both ignore lines;
+  /conclave:continue needs the plan document on this machine and ties a run from another
+  machine to committed plans; /conclave:init says plans are not committed by default and does
+  not ask about the opt-in; the profile template leaves `docs.commit_plans` out; the check is
+  first run on known-bad variants as well;
 - with --base: if anything under plugins/ changed since <ref>, the version changed too,
   because installs from git are cached by version and `claude plugin update` does
   nothing for an unchanged version.
@@ -559,6 +573,459 @@ if brief_step is None or "`exec.brief`" not in brief_step or "holds no `plan`" n
 if len(errors) == errors_before_plan_launch:
     ok("the plan launch after the analysis checkpoint drops exec.decisions and exec.proceed; "
        "continue sends a T2 brief to exec.brief only before a plan exists")
+
+
+# A plan document is the working paper of one task: by default the lead keeps it out of every
+# commit and adds the plans directory to .gitignore; `docs.commit_plans: true` opts back in.
+# The lead reads the setting by name, so the schema must declare it as an off-by-default
+# boolean and lead.md must name it; and none of the statements that made a plan a committed
+# file may come back in the files that tell the lead, the template or the profile what to do.
+SCHEMA_REL = "schemas/conclave.schema.json"
+LEAD_REL = "agents/lead.md"
+PLAN_COMMIT_FILES = [LEAD_REL, "templates/plan.md", "skills/init/SKILL.md", SCHEMA_REL]
+PLAN_COMMIT_RETIRED = [
+    "committed record",
+    "it is a committed file",
+    "the plan document is in the first",
+    "committed with the change",
+    "where per-task plan documents are committed",
+]
+
+
+def plan_commit_problems(texts):
+    """Every way the files in PLAN_COMMIT_FILES (relative path -> text) undo local plans."""
+    problems = []
+    try:
+        docs = json.loads(texts[SCHEMA_REL])["properties"]["docs"]["properties"]
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        return [f"{SCHEMA_REL}: cannot read `properties.docs.properties` ({e!r})"]
+    setting = docs.get("commit_plans")
+    if not isinstance(setting, dict):
+        problems.append(f"{SCHEMA_REL}: `docs` does not declare `commit_plans`, the opt-in for committing plans")
+    elif setting.get("type") != "boolean" or setting.get("default") is not False:
+        problems.append(f"{SCHEMA_REL}: `docs.commit_plans` must be a boolean with default `false`, "
+                        f"found type {setting.get('type')!r} and default {setting.get('default')!r}")
+    elif not str(setting.get("description", "")).strip():
+        problems.append(f"{SCHEMA_REL}: `docs.commit_plans` has no description")
+    if "commit_plans" not in texts[LEAD_REL]:
+        problems.append(f"{LEAD_REL}: does not name `commit_plans`, so the lead never reads the opt-in")
+    for rel in PLAN_COMMIT_FILES:
+        lowered = texts[rel].lower()
+        for stale in PLAN_COMMIT_RETIRED:
+            if stale in lowered:
+                problems.append(f"{rel}: still says {stale!r}; plan documents are not committed by default")
+    return problems
+
+
+GOOD_PLAN_SCHEMA = json.dumps({"properties": {"docs": {"properties": {
+    "plans": {"type": "string", "description": "Directory for per-task plan documents; ignored by git."},
+    "commit_plans": {"type": "boolean", "default": False, "description": "Commit plan documents."},
+}}}})
+GOOD_PLAN_TEXTS = {
+    LEAD_REL: "The plan document is not committed unless `profile.docs.commit_plans` is `true`.",
+    "templates/plan.md": "(build-safe slices in order; the plan document is in none of them)",
+    "skills/init/SKILL.md": "Propose `docs.plans`; plan documents are not committed by default.",
+    SCHEMA_REL: GOOD_PLAN_SCHEMA,
+}
+
+
+def plan_case(rel, text):
+    return {**GOOD_PLAN_TEXTS, rel: text}
+
+
+def schema_case(**commit_plans):
+    schema = json.loads(GOOD_PLAN_SCHEMA)
+    setting = schema["properties"]["docs"]["properties"]
+    if commit_plans:
+        setting["commit_plans"] = commit_plans
+    else:
+        del setting["commit_plans"]
+    return plan_case(SCHEMA_REL, json.dumps(schema))
+
+
+BAD_PLAN_COMMITS = {
+    "`commit_plans` missing": (schema_case(), "does not declare `commit_plans`"),
+    "`commit_plans` not a boolean": (
+        schema_case(type="string", default="false", description="x"), "must be a boolean with default `false`"),
+    "`commit_plans` on by default": (
+        schema_case(type="boolean", default=True, description="x"), "must be a boolean with default `false`"),
+    "`commit_plans` without a default": (
+        schema_case(type="boolean", description="x"), "must be a boolean with default `false`"),
+    "`commit_plans` without a description": (schema_case(type="boolean", default=False), "has no description"),
+    "lead.md no longer names `commit_plans`": (
+        plan_case(LEAD_REL, "The plan document is not committed."), f"{LEAD_REL}: does not name `commit_plans`"),
+    "the committed record back in lead.md": (
+        plan_case(LEAD_REL, GOOD_PLAN_TEXTS[LEAD_REL] + " The plan document is the Committed record."),
+        f"{LEAD_REL}: still says 'committed record'"),
+    "the committed file back in lead.md": (
+        plan_case(LEAD_REL, GOOD_PLAN_TEXTS[LEAD_REL] + " It is a committed file."),
+        f"{LEAD_REL}: still says 'it is a committed file'"),
+    "the first slice back in the plan template": (
+        plan_case("templates/plan.md", "(build-safe slices in order; the plan document is in the first)"),
+        "templates/plan.md: still says 'the plan document is in the first'"),
+    "committed plans back in the init skill": (
+        plan_case("skills/init/SKILL.md", "Propose `docs.plans` (where per-task plan documents are committed)."),
+        "skills/init/SKILL.md: still says 'where per-task plan documents are committed'"),
+    "committed with the change back in the schema": (
+        plan_case(SCHEMA_REL, GOOD_PLAN_SCHEMA.replace("ignored by git.", "committed with the change.")),
+        f"{SCHEMA_REL}: still says 'committed with the change'"),
+}
+
+errors_before_plan_commit = len(errors)
+if plan_commit_problems(GOOD_PLAN_TEXTS):
+    fail(f"plan commit check rejects valid files: {plan_commit_problems(GOOD_PLAN_TEXTS)}")
+for case, (texts, expected) in BAD_PLAN_COMMITS.items():
+    got = plan_commit_problems(texts)
+    if len(got) != 1 or expected not in got[0]:
+        fail(f"plan commit check on {case}: expected one problem containing {expected!r}, got {got}")
+for problem in plan_commit_problems({rel: (PLUGIN / rel).read_text() for rel in PLAN_COMMIT_FILES}):
+    fail(problem)
+if len(errors) == errors_before_plan_commit:
+    ok(f"plan documents stay local by default: the schema declares docs.commit_plans off, lead.md names it, "
+       f"no retired statement remains ({len(BAD_PLAN_COMMITS)} bad variants rejected)")
+
+
+# The default rests on rules only lead.md carries: step 2 of the plan document section adds the
+# ignore lines (the directory with one trailing slash, so the plan-named pattern after it never
+# reads `//`, which git does not match), asks the user instead of guessing when the plans directory
+# tracks other documents, checks the new lines with `git check-ignore`, gives the one-time notice
+# only where it adds the line, and keeps `.gitignore` in `exec.lead_files` only while its diff
+# against the base is the lead's own added lines (scope-check.sh compares the tree with the base,
+# so a line committed by an earlier task would otherwise be sent to a dev to revert, while any
+# other edit must still reach the scope gate). The Commit proposal must stage the lead's own
+# uncommitted files in a slice of their own, since no workflow slice carries them, put a committed
+# plan in that slice, and keep the plan document out of every slice by default.
+LEAD_STEP_2 = re.compile(r"^2\. Create `\.claude/conclave/runs/.*$(?:\n {3}.*$)*", re.M)
+LEAD_COMMIT = re.compile(r"^## Commit proposal\n(.*?)(?=^## |\Z)", re.S | re.M)
+LEAD_IGNORE_RULES = [
+    (LEAD_STEP_2, "`.claude/conclave/`", "no longer ignores the run JSON directory"),
+    (LEAD_STEP_2, "unless plans are committed, the plans directory", "no longer ignores the plans directory"),
+    (LEAD_STEP_2, "one trailing slash", "no longer says how the plans directory line ends"),
+    (LEAD_STEP_2, "git ls-files", "no longer checks what is tracked in the plans directory before ignoring it"),
+    (LEAD_STEP_2, "- **Tier:**", "no longer tells a tracked plan document from another date-named document"),
+    (LEAD_STEP_2, "AskUserQuestion", "no longer asks the user when the plans directory tracks other documents"),
+    (LEAD_STEP_2, "<plans directory without its trailing slash>/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*.md",
+     "no longer offers a plan-named pattern git can match"),
+    (LEAD_STEP_2, "keeps the old behaviour", "no longer gives the notice to a project that already tracks plans"),
+    (LEAD_STEP_2, "in the message where you add", "no longer limits the notice to the message that adds the line"),
+    (LEAD_STEP_2, "Never untrack", "no longer forbids untracking files in the plans directory"),
+    (LEAD_STEP_2, "git check-ignore", "no longer checks that the new lines ignore the run JSON and the plan"),
+    (LEAD_STEP_2, "git diff <profile.base> -- .gitignore",
+     "no longer reads the diff of `.gitignore` against the base before naming it in `exec.lead_files`"),
+    (LEAD_STEP_2, "removes none", "no longer leaves `.gitignore` out of `exec.lead_files` when other lines changed"),
+    (LEAD_COMMIT, "`.gitignore`", "the Commit proposal no longer commits the `.gitignore` lines the lead added"),
+    (LEAD_COMMIT, "first slice of its own", "the Commit proposal no longer gives the lead's own files a slice"),
+    (LEAD_COMMIT, "git status --porcelain",
+     "the Commit proposal no longer limits the lead's slice to files with uncommitted changes"),
+    (LEAD_COMMIT, "the slice of your own files",
+     "the Commit proposal no longer says which first slice a committed plan goes into"),
+    (LEAD_COMMIT, "By default the plan document is in no slice",
+     "the Commit proposal no longer keeps the plan document out of every slice by default"),
+]
+# A placeholder for a directory that ends in a slash, followed by another slash, gives `//`.
+LEAD_IGNORE_FORBIDDEN = [
+    (LEAD_STEP_2, "<plans directory>/", "writes the plan-named pattern after a directory that ends in a slash"),
+    (LEAD_STEP_2, "//", "writes an ignore line with `//`, which git never matches"),
+]
+
+
+def lead_ignore_problems(lead_text):
+    """Every rule of LEAD_IGNORE_RULES that lead_text no longer carries, and every forbidden form it
+    carries, naming lead.md."""
+    problems = []
+    for section, needle, why in LEAD_IGNORE_RULES:
+        found = section.search(lead_text)
+        if not found:
+            problems.append(f"{LEAD_REL}: {why} (section {section.pattern!r} not found)")
+        elif needle not in found.group(0):
+            problems.append(f"{LEAD_REL}: {why} (missing {needle!r})")
+    for section, needle, why in LEAD_IGNORE_FORBIDDEN:
+        found = section.search(lead_text)
+        if found and needle in found.group(0):
+            problems.append(f"{LEAD_REL}: {why} (found {needle!r})")
+    return problems
+
+
+GOOD_LEAD_IGNORE = (
+    "2. Create `.claude/conclave/runs/<slug>.json`. Local working state:\n"
+    "   - The ignore file lists `.claude/conclave/` and, unless plans are committed, the plans directory, with "
+    "one trailing slash.\n"
+    "   - Run git ls-files first; a plan document carries the - **Tier:** line; otherwise ask with "
+    "AskUserQuestion, offering "
+    "`<plans directory without its trailing slash>/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*.md`.\n"
+    "   - Say once, in the message where you add the line, that `docs.commit_plans: true` keeps the old behaviour. "
+    "Never untrack them.\n"
+    "   - Confirm with git check-ignore.\n"
+    "   - Name it in `exec.lead_files` while `git diff <profile.base> -- .gitignore` adds only these lines "
+    "and removes none.\n"
+    "3. Presentation.\n"
+    "## Commit proposal\n"
+    "Lead files (`.gitignore`) that git status --porcelain shows go into a first slice of its own; a committed "
+    "plan goes into the slice of your own files. By default the plan document is in no slice.\n"
+    "## Rules\n"
+)
+BAD_LEAD_IGNORE = {
+    f"lead.md without {needle!r}": (GOOD_LEAD_IGNORE.replace(needle, "", 1), why)
+    for _, needle, why in LEAD_IGNORE_RULES
+}
+BAD_LEAD_IGNORE["lead.md with a pattern after `<plans directory>/`"] = (
+    GOOD_LEAD_IGNORE.replace("Confirm with", "Or `<plans directory>/*.md`. Confirm with", 1),
+    "after a directory that ends in a slash")
+BAD_LEAD_IGNORE["lead.md with a `//` ignore line"] = (
+    GOOD_LEAD_IGNORE.replace("Confirm with", "Default `docs/plans//[0-9]*.md`. Confirm with", 1), "`//`")
+BAD_LEAD_IGNORE["lead.md without step 2"] = (
+    GOOD_LEAD_IGNORE.replace("2. Create", "Create", 1), "(section")
+BAD_LEAD_IGNORE["lead.md without a Commit proposal"] = (
+    GOOD_LEAD_IGNORE.replace("## Commit proposal", "## Commits", 1), "(section")
+BAD_LEAD_IGNORE["lead.md with step 2's sub-bullets moved out of it"] = (
+    GOOD_LEAD_IGNORE.replace("state:\n   - The", "state:\n\nThe", 1), "(missing")
+
+errors_before_lead_ignore = len(errors)
+if lead_ignore_problems(GOOD_LEAD_IGNORE):
+    fail(f"lead ignore check rejects a valid lead.md: {lead_ignore_problems(GOOD_LEAD_IGNORE)}")
+for case, (text, expected) in BAD_LEAD_IGNORE.items():
+    got = lead_ignore_problems(text)
+    if case.endswith(("step 2", "Commit proposal", "moved out of it")):
+        # Losing a whole section, or the sub-bullets of step 2, drops every rule it carries.
+        if len(got) < 2 or not all(expected in p and p.startswith(f"{LEAD_REL}:") for p in got):
+            fail(f"lead ignore check on {case}: expected several problems containing {expected!r}, got {got}")
+    elif len(got) != 1 or expected not in got[0] or not got[0].startswith(f"{LEAD_REL}:"):
+        fail(f"lead ignore check on {case}: expected one problem containing {expected!r}, got {got}")
+for problem in lead_ignore_problems((PLUGIN / LEAD_REL).read_text()):
+    fail(problem)
+if len(errors) == errors_before_lead_ignore:
+    ok(f"lead.md ignores the plans directory with a pattern git matches, asks before ignoring other documents, "
+       f"warns once, keeps only its own .gitignore lines in lead_files and commits them "
+       f"({len(BAD_LEAD_IGNORE)} bad variants rejected)")
+
+# The rest of the local-plan default lives in prose the lead and the skills follow, outside the
+# two lead.md sections checked above: the plan-document paragraph says a request in the task opts
+# that task in without touching the profile; the Commit proposal sets Status `done` in the local
+# document by default; /conclave:plan step 3 names both ignore lines; /conclave:continue no longer
+# promises a restart "from another machine" when plans are not committed; /conclave:init says plans
+# are not committed by default and does not ask about the opt-in; and the profile template leaves
+# `docs.commit_plans` out, so a project created from it keeps its plans local.
+LOCAL_PLAN_FILES = [LEAD_REL, "skills/plan/SKILL.md", "skills/continue/SKILL.md", "skills/init/SKILL.md",
+                    "templates/conclave.json"]
+LEAD_PLAN_PARAGRAPH = "Every task at T1 and above is written down"
+PLAN_STEP_3 = "3. Create the plan document"
+CONTINUE_NO_RUN = "   - A slug with no run JSON"
+INIT_DOCS = "- **Docs.**"
+
+
+def anchored_line(text, prefix):
+    """The first line of text that starts with prefix, or None."""
+    return next((line for line in text.splitlines() if line.startswith(prefix)), None)
+
+
+def local_plan_prompt_problems(texts):
+    """Every way lead.md, the plan, continue and init skills and the profile template (relative path ->
+    text) drop a rule of the local-plan default, one message each, naming the file."""
+    problems = []
+
+    paragraph = anchored_line(texts[LEAD_REL], LEAD_PLAN_PARAGRAPH)
+    if paragraph is None:
+        problems.append(f"{LEAD_REL}: no plan-document paragraph starting {LEAD_PLAN_PARAGRAPH!r}")
+    else:
+        for needle, why in [("asks in the task", "no longer lets a request in the task commit the plan"),
+                            ("do not change the profile", "no longer keeps a request in the task out of the profile")]:
+            if needle not in paragraph:
+                problems.append(f"{LEAD_REL}: the plan-document paragraph {why} (missing {needle!r})")
+
+    commit = LEAD_COMMIT.search(texts[LEAD_REL])
+    done_local = "Status `done` in the local document"
+    if commit is None:
+        problems.append(f"{LEAD_REL}: no `## Commit proposal` section")
+    elif done_local not in commit.group(1):
+        problems.append(f"{LEAD_REL}: the Commit proposal no longer sets Status `done` in the uncommitted plan "
+                        f"document after the last commit (missing {done_local!r})")
+
+    step_3 = anchored_line(texts["skills/plan/SKILL.md"], PLAN_STEP_3)
+    if step_3 is None:
+        problems.append(f"skills/plan/SKILL.md: no step starting {PLAN_STEP_3!r}")
+    else:
+        for needle in ("`.claude/conclave/`", "unless plans are committed, the plans directory"):
+            if needle not in step_3:
+                problems.append(f"skills/plan/SKILL.md: step 3 does not name both ignore lines (missing {needle!r})")
+
+    restart = anchored_line(texts["skills/continue/SKILL.md"], CONTINUE_NO_RUN)
+    if restart is None:
+        problems.append(f"skills/continue/SKILL.md: no bullet starting {CONTINUE_NO_RUN.strip()!r}")
+    else:
+        if "present on this machine" not in restart:
+            problems.append("skills/continue/SKILL.md: the restart from a plan document does not say the document "
+                            "must be present on this machine")
+        # Each sentence that mentions another machine must tie it to committed plans.
+        for sentence in re.split(r"(?<=[.;])\s+", restart):
+            if "another machine" in sentence and "commit" not in sentence:
+                problems.append("skills/continue/SKILL.md: the restart from a plan document still covers a run from "
+                                "another machine without tying it to a project that commits its plans")
+
+    docs_line = anchored_line(texts["skills/init/SKILL.md"], INIT_DOCS)
+    if docs_line is None:
+        problems.append(f"skills/init/SKILL.md: no bullet starting {INIT_DOCS!r}")
+    else:
+        for needle, why in [("`docs.plans`", "no longer proposes `docs.plans`"),
+                            ("not committed by default", "no longer says plan documents are not committed by default"),
+                            ("do not ask", "no longer says not to ask about `docs.commit_plans`")]:
+            if needle not in docs_line:
+                problems.append(f"skills/init/SKILL.md: the Docs bullet {why} (missing {needle!r})")
+
+    try:
+        template_docs = json.loads(texts["templates/conclave.json"]).get("docs", {})
+    except (json.JSONDecodeError, AttributeError) as e:
+        problems.append(f"templates/conclave.json: cannot read `docs` ({e!r})")
+    else:
+        if "commit_plans" in template_docs:
+            problems.append("templates/conclave.json: sets `docs.commit_plans`; the opt-in is left out of new profiles")
+    return problems
+
+
+GOOD_LOCAL_PLAN = {
+    LEAD_REL: (
+        f"{LEAD_PLAN_PARAGRAPH}. Not committed unless `profile.docs.commit_plans` is `true` or the user asks in the "
+        "task. A request holds for that task; do not change the profile unless asked.\n"
+        "## Commit proposal\nBy default the plan document is in no slice; set Status `done` in the local document.\n"
+        "## Rules\n"),
+    "skills/plan/SKILL.md": (
+        f"{PLAN_STEP_3} as lead.md says (`.claude/conclave/` and, unless plans are committed, the plans directory).\n"),
+    "skills/continue/SKILL.md": (
+        "1. Pick the run.\n"
+        f"{CONTINUE_NO_RUN} but a plan document: the state is lost (the JSON was deleted, or, in a project that "
+        "commits its plans, the run came from another machine). The document must be present on this machine; "
+        "a run from another machine needs its document committed or copied.\n"),
+    "skills/init/SKILL.md": (
+        f"{INIT_DOCS} Propose `docs.plans`; plan documents are not committed by default. Leave `docs.commit_plans` "
+        "out and do not ask about it.\n"),
+    "templates/conclave.json": json.dumps({"docs": {"plans": "docs/plans/"}}),
+}
+
+
+def local_plan_case(rel, old, new):
+    assert old in GOOD_LOCAL_PLAN[rel], (rel, old)
+    return {**GOOD_LOCAL_PLAN, rel: GOOD_LOCAL_PLAN[rel].replace(old, new, 1)}
+
+
+BAD_LOCAL_PLAN = {
+    "lead.md without the request in the task": (
+        local_plan_case(LEAD_REL, "or the user asks in the task", ""), "missing 'asks in the task'"),
+    "lead.md changing the profile on a request": (
+        local_plan_case(LEAD_REL, "do not change the profile unless asked", "save it in the profile"),
+        "missing 'do not change the profile'"),
+    "lead.md without the plan-document paragraph": (
+        local_plan_case(LEAD_REL, LEAD_PLAN_PARAGRAPH, "Each task is written down"), "no plan-document paragraph"),
+    "lead.md without Status done in the local document": (
+        local_plan_case(LEAD_REL, "set Status `done` in the local document", "leave Status alone"),
+        "no longer sets Status `done`"),
+    "lead.md without a Commit proposal": (
+        local_plan_case(LEAD_REL, "## Commit proposal", "## Commits"), "no `## Commit proposal`"),
+    "plan step 3 with only the run JSON line": (
+        local_plan_case("skills/plan/SKILL.md", " and, unless plans are committed, the plans directory", ""),
+        "missing 'unless plans are committed, the plans directory'"),
+    "plan step 3 without the run JSON line": (
+        local_plan_case("skills/plan/SKILL.md", "`.claude/conclave/` and", ""), "missing '`.claude/conclave/`'"),
+    "plan without step 3": (
+        local_plan_case("skills/plan/SKILL.md", PLAN_STEP_3, "Create the plan document"), "no step starting"),
+    "continue without this machine": (
+        local_plan_case("skills/continue/SKILL.md", "must be present on this machine", "is read"),
+        "must be present on this machine"),
+    "continue with the old another-machine wording": (
+        local_plan_case("skills/continue/SKILL.md", "the JSON was deleted, or, in a project that commits its plans, "
+                        "the run came from another machine", "the JSON was deleted or the run came from another machine"),
+        "without tying it to a project that commits its plans"),
+    "continue without the restart bullet": (
+        local_plan_case("skills/continue/SKILL.md", CONTINUE_NO_RUN, "   - No run JSON"), "no bullet starting"),
+    "init without not committed by default": (
+        local_plan_case("skills/init/SKILL.md", "plan documents are not committed by default", "plans are committed"),
+        "missing 'not committed by default'"),
+    "init asking about commit_plans": (
+        local_plan_case("skills/init/SKILL.md", "out and do not ask about it", "and ask the user whether to set it"),
+        "missing 'do not ask'"),
+    "init without docs.plans": (
+        local_plan_case("skills/init/SKILL.md", "Propose `docs.plans`", "Propose a plans directory"),
+        "missing '`docs.plans`'"),
+    "the profile template sets commit_plans": (
+        local_plan_case("templates/conclave.json", '"docs/plans/"}', '"docs/plans/", "commit_plans": true}'),
+        "templates/conclave.json: sets `docs.commit_plans`"),
+}
+
+errors_before_local_plan = len(errors)
+if local_plan_prompt_problems(GOOD_LOCAL_PLAN):
+    fail(f"local plan check rejects valid files: {local_plan_prompt_problems(GOOD_LOCAL_PLAN)}")
+for case, (texts, expected) in BAD_LOCAL_PLAN.items():
+    got = local_plan_prompt_problems(texts)
+    if len(got) != 1 or expected not in got[0]:
+        fail(f"local plan check on {case}: expected one problem containing {expected!r}, got {got}")
+for problem in local_plan_prompt_problems({rel: (PLUGIN / rel).read_text() for rel in LOCAL_PLAN_FILES}):
+    fail(problem)
+if len(errors) == errors_before_local_plan:
+    ok(f"lead, plan, continue, init and the profile template keep plans local by default "
+       f"({len(BAD_LOCAL_PLAN)} bad variants rejected)")
+
+# The ignore lines are prose the lead copies into a project's .gitignore, so what they match is
+# git's business, not the prompt's: every default plans line lead.md step 2 writes (a backticked
+# `docs/plans/...`) is put in a scratch repository's .gitignore on its own, and git must ignore a
+# plan document of the template's name under it; a plan-named pattern must leave a non-plan file
+# such as `docs/plans/README.md` alone, and `.claude/conclave/` must ignore the run JSON.
+PLAN_DOC_PATH = "docs/plans/2026-11-21-plan-documents-stay-local.md"
+NON_PLAN_PATH = "docs/plans/README.md"
+RUN_JSON_PATH = ".claude/conclave/runs/plan-documents-stay-local.json"
+
+
+def ignore_line_problems(step_2):
+    """Every default ignore line in step_2 that git does not apply as lead.md describes it."""
+    import tempfile
+
+    problems = []
+    lines = sorted(set(re.findall(r"`(docs/plans/[^`]*)`", step_2)))
+    if not lines:
+        return [f"{LEAD_REL}: step 2 names no default plans line (`docs/plans/...`)"]
+    if "`.claude/conclave/`" not in step_2:
+        problems.append(f"{LEAD_REL}: step 2 does not name the `.claude/conclave/` line")
+    with tempfile.TemporaryDirectory() as repo:
+        init = subprocess.run(["git", "init", "-q", repo], capture_output=True, text=True)
+        if init.returncode != 0:
+            return [f"cannot create a scratch git repository: {init.stderr.strip()}"]
+
+        def ignored(pattern, path):
+            Path(repo, ".gitignore").write_text(pattern + "\n")
+            return subprocess.run(["git", "check-ignore", "-q", "--no-index", path], cwd=repo).returncode == 0
+
+        if not ignored(".claude/conclave/", RUN_JSON_PATH):
+            problems.append(f"git does not ignore {RUN_JSON_PATH} with `.claude/conclave/`")
+        for line in lines:
+            if not ignored(line, PLAN_DOC_PATH):
+                problems.append(f"{LEAD_REL}: git does not ignore {PLAN_DOC_PATH} with the line `{line}`")
+            if line != "docs/plans/" and ignored(line, NON_PLAN_PATH):
+                problems.append(f"{LEAD_REL}: the plan-named line `{line}` also ignores {NON_PLAN_PATH}")
+    return problems
+
+
+GOOD_STEP_2 = ("2. Create `.claude/conclave/runs/<slug>.json`; ignore `.claude/conclave/` and `docs/plans/`, or "
+               "`docs/plans/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*.md`.")
+BAD_STEP_2 = {
+    "a `//` plan-named line": (
+        GOOD_STEP_2.replace("`docs/plans/[0-9]", "`docs/plans//[0-9]"), "git does not ignore"),
+    "a plan-named line that matches every file": (
+        GOOD_STEP_2.replace("[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*.md", "*"), "also ignores"),
+    "a plans line without a slash before the file": (
+        GOOD_STEP_2.replace("`docs/plans/[0-9]", "`docs/plans/x[0-9]"), "git does not ignore"),
+    "no default plans line": (GOOD_STEP_2.replace("`docs/plans/", "`plans/"), "names no default plans line"),
+    "no run JSON line": (GOOD_STEP_2.replace("ignore `.claude/conclave/` and", "ignore"), "`.claude/conclave/` line"),
+}
+
+errors_before_ignore_lines = len(errors)
+if ignore_line_problems(GOOD_STEP_2):
+    fail(f"ignore line check rejects valid lines: {ignore_line_problems(GOOD_STEP_2)}")
+for case, (text, expected) in BAD_STEP_2.items():
+    got = ignore_line_problems(text)
+    if len(got) != 1 or expected not in got[0]:
+        fail(f"ignore line check on {case}: expected one problem containing {expected!r}, got {got}")
+real_step_2 = LEAD_STEP_2.search((PLUGIN / LEAD_REL).read_text())
+for problem in ignore_line_problems(real_step_2.group(0) if real_step_2 else ""):
+    fail(problem)
+if len(errors) == errors_before_ignore_lines:
+    ok(f"git applies the default ignore lines of lead.md step 2 as described ({len(BAD_STEP_2)} bad variants rejected)")
 
 if "--base" in sys.argv:
     base = sys.argv[sys.argv.index("--base") + 1]

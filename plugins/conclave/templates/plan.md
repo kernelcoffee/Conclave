@@ -116,4 +116,4 @@ Edit these before the build stage to steer: the devs build from exactly what is 
 
 ## Commit plan
 
-1. <imperative title>: <files> (build-safe slices in order; the plan document is in the first)
+1. <imperative title>: <files> (build-safe slices in order; the plan document is in none of them unless the project commits its plans)

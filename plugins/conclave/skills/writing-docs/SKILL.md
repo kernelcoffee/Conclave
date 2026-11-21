@@ -1,6 +1,6 @@
 ---
 name: writing-docs
-description: How Conclave writes documentation and plan documents so a human can read them: structure for each kind of document, when a table or a code block beats prose, when a diagram earns its place, and Mermaid patterns that render on GitHub and GitLab. Loaded by the docs-writer and the lead.
+description: How Conclave writes documentation and plan documents so a human can read them: structure for each kind of document, when a table or a code block beats prose, when a diagram earns its place, Mermaid patterns that render on GitHub and GitLab, and how a project that uses Diátaxis files its documentation in four directories. Loaded by the docs-writer and the lead.
 user-invocable: false
 ---
 # Writing documentation
@@ -22,8 +22,11 @@ code comes first; presentation is what makes the truth findable.
 - No marketing, no diff summaries, no "round 3" or ticket numbers in a document that
   describes the system; the log of how a change was made belongs in the plan document's
   Log, not in the architecture doc.
-- Keep the document's existing structure and tone when editing it; add presentation to
-  the sections you touch, do not reformat sections the change did not reach.
+- In a project that does not use Diátaxis (`docs.diataxis` is `false` or absent), and in
+  every section a change does not touch, keep the document's existing structure and
+  tone when editing it; add presentation to the sections you touch, do not reformat
+  sections the change did not reach. A project that uses Diátaxis places and moves text
+  as the Diátaxis section below says.
 
 ## When to use what
 
@@ -149,3 +152,83 @@ lives in the Analysis, not in the technical spec. Current state and Proposed mod
 diagram when the change touches more than two parts or a flow; the Contracts section gets
 a sequence diagram when two components talk; Decisions are a table or a list with one
 consequence per option.
+
+## Diátaxis
+
+A project whose profile sets `docs.diataxis` to `true` sorts its documentation by what
+the reader needs, in four kinds, each in a directory of its own. The user chose this for
+the project; nothing here applies when the key is `false` or absent.
+
+| Kind | The reader needs | The document contains | It leaves out | Directory |
+|---|---|---|---|---|
+| Tutorial | to learn by doing, as a newcomer | one guided lesson from a clean start to a result that always works, every step and command given, what the reader should see after each | choices, alternatives, background, every option | `tutorials/` |
+| How-to guide | to reach a goal they already have | the goal in one sentence, the steps in order with the exact commands, what success looks like, what to do when it fails | teaching the basics, the why, a full list of options | `how-to/` |
+| Reference | to look up a fact while working | every item of one family (setting, command, endpoint, field, event) in the same format: name, type or shape, default, effect | steps, opinions, the why | `reference/` |
+| Explanation | to understand why | the design, its reasons and trade-offs, the history, how the parts fit, a diagram when the pack calls for one | steps to follow, the full list of items | `explanation/` |
+
+To tell which kind a text is, ask two questions: is the reader learning or working, and
+do they need to do something or to know something?
+
+| | Do | Know |
+|---|---|---|
+| Learning | tutorial | explanation |
+| Working | how-to guide | reference |
+
+A text that answers both ways is two texts: split it, put each part in its directory, and
+link them to each other. Signs that settle most cases: numbered steps toward a goal the
+reader brings are a how-to guide; a lesson with a fixed, safe example is a tutorial; a
+table with one row per item is reference; "because", "instead of", "trade-off" and
+diagrams of how parts fit are explanation.
+
+The existing "Document kinds" map onto the four as follows. A README is none of them: it
+stays where it is as the entry point and links to the index of each of the four
+directories; small-step rule 4 names the sections it keeps. A how-to goes in `how-to/`. A reference (API,
+settings, CLI) goes in `reference/`. A technical spec or architecture document is
+explanation; its tables of fields or commands are reference and go there. A functional spec
+kept as project documentation and a decision record are explanation. A plan document is none
+of the four: it stays in the plans directory and is never filed or moved.
+
+**Where the directories sit.** Under the first directory listed in `docs.paths`, that is
+the first entry that ends with `/` and is not the plans directory (`docs.plans`), which is
+ignored by git and never holds documentation, or under `docs/` when no such entry exists:
+`<that directory>/tutorials/`, `how-to/`, `reference/`, `explanation/`. An entry without
+the trailing `/` is not a directory here, even when one of that name exists: the scope gate
+reads it as a single file, so nothing written under it is in scope. When the user answers
+yes for a project whose `docs.paths` has no entry ending with `/`, the lead or
+`/conclave:init` adds `docs/` to it in the same write, so the directories are yours to
+create. When they are outside `docs.paths` all the same (the entry was removed later), you
+may not create them: write as a project without Diátaxis does and say under `gaps` that a
+directory must be added to `docs.paths`.
+
+**Small steps.** The documentation moves into the four directories as tasks touch it,
+never in one pass:
+
+1. New text goes into the directory of its kind: into the file there on the same subject,
+   or a new file named after the subject in lowercase kebab-case.
+2. A directory that does not exist yet is created with a short index file (`README.md`, or
+   `index.md` when the project's other directories use that name) holding a heading, one
+   sentence saying what belongs there, and a list of its files. Add every new file to its
+   directory's index, and link a new index from the README when the README is in
+   `docs.paths` (under `gaps` when it is not).
+3. A section of an older document outside the four directories moves only when this change
+   makes you edit it. The section is the smallest one that holds the edit: from the deepest
+   heading above the edited text to the next heading of any level (the edited paragraphs
+   alone when no heading comes before them). Move that section, with your edit, to the file
+   of its kind; its parent and sibling sections stay where they are. In its old place keep
+   the heading and replace its body with one line that points to the new place
+   (`Moved to [Title](relative/path.md#anchor).`). A parent section whose content is now
+   only such pointer lines, its subsections' included, is listed under `gaps`.
+4. Move nothing else. Sections you did not have to edit stay where they are, even when they
+   belong elsewhere; list those in the documents you edited under `gaps`, one line each with
+   the kind they belong to. Never move text out of a file you may not edit, the plans
+   directory, the roadmap named by `docs.roadmap`, a changelog, or the README's entry-point
+   sections: what the project is and who it is for, a short feature list, install, first
+   run, and the links to the four indexes. Edit those in place. Every other README section
+   (configuration, development commands, architecture, a long feature reference) is an
+   older section like any other and follows rule 3.
+5. After a move, search the repository for links to the old file and its anchors. Update
+   the ones inside `docs.paths`; list every other one under `gaps` with file and line, for
+   whoever owns that file.
+
+In audit mode, in a project that uses Diátaxis, text placed in the directory of the wrong
+kind is a finding: quote it and name the kind and directory it belongs to.

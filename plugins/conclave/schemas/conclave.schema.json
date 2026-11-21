@@ -236,6 +236,10 @@
           "type": "boolean",
           "default": false,
           "description": "Commit plan documents with the change: the lead puts the plan document in the first commit slice and does not add the plans directory to .gitignore. Off by default because a plan is the working document of one task."
+        },
+        "diataxis": {
+          "type": "boolean",
+          "description": "Whether the project's documentation follows the Diátaxis framework: when true, the docs-writer files what it writes under tutorials/, how-to/, reference/ and explanation/ and moves older text there only when a change makes it edit that text; when false, it keeps the existing structure. The user's decision, asked once by /conclave:init or by the lead at the next task. No default: absent means the user has not been asked yet."
         }
       }
     },

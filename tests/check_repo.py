@@ -36,6 +36,23 @@
   machine to committed plans; /conclave:init says plans are not committed by default and does
   not ask about the opt-in; the profile template leaves `docs.commit_plans` out; the check is
   first run on known-bad variants as well;
+- the schema declares `docs.diataxis` as a boolean with a description and no default, and the
+  profile template leaves it out; the writing pack has a `## Diátaxis` section naming the four
+  directories, keeps "Document kinds" and the Mermaid patterns, and limits the keep-the-structure
+  rule to projects that do not use Diátaxis; the docs-writer and the lead name `docs.diataxis`
+  without naming the directories, the docs-writer points to the pack and reports unfixable links
+  under `gaps`, the lead asks with AskUserQuestion, never when the key is present, and names
+  `exec.lead_files`; /conclave:init asks the question and reports it open on an existing profile;
+  the check is first run on known-bad variants as well;
+- a profile validates with `docs.diataxis` true or false and not with any other type; the pack
+  gives each kind its reader, contents and omissions, tells the kinds apart, creates a missing
+  directory with an index file, leaves a pointer, moves nothing else, fixes links inside
+  `docs.paths` and lists the others with file and line, and makes misfiled text an audit
+  finding; the docs-writer keeps its voice rule, says Diátaxis does not apply when the key is
+  `false` or absent, and carries the link rule and the audit finding; the lead and init
+  recommend yes with each option's consequence, the lead at T1 or above and saying what it
+  wrote; neither agent restates a rule only the pack states; the check is first run on
+  known-bad variants as well;
 - with --base: if anything under plugins/ changed since <ref>, the version changed too,
   because installs from git are cached by version and `claude plugin update` does
   nothing for an unchanged version.
@@ -1026,6 +1043,616 @@ for problem in ignore_line_problems(real_step_2.group(0) if real_step_2 else "")
     fail(problem)
 if len(errors) == errors_before_ignore_lines:
     ok(f"git applies the default ignore lines of lead.md step 2 as described ({len(BAD_STEP_2)} bad variants rejected)")
+
+
+# A project records whether its documentation follows Diátaxis in `docs.diataxis`: a boolean the
+# user sets, with no default, because an absent key is what tells the lead and /conclave:init that
+# the question is still open; the profile template must not answer it for the user. The rules live
+# in the writing pack's `## Diátaxis` section with the four directory names; the docs-writer and
+# the lead name the key and point at that section without restating the rules (the directory names
+# stay out of both agents). The section that moves is the smallest one holding the edit, and the
+# README's entry-point sections never move, so a one-line edit cannot carry a chapter or hollow the
+# README. The lead asks with AskUserQuestion only when `docs.paths` is non-empty, never when the key
+# is present, and adds `docs/` to `docs.paths` on a yes when no entry ends with `/` (else the pack's
+# `docs/` fallback is outside the writer's reach). A directory entry is one that ends with `/`, as
+# the scope gate reads it: a bare `docs` matches only a file of that name, so the four directories
+# under it would be out of scope. The lead names the profile in `exec.lead_files` while its
+# difference from `profile.base` is only the lines it wrote with the user's agreement, not only in
+# the task that asked: the scope gate compares the tree with the base, commits included, so a later
+# task on the branch would otherwise send the committed answer to a dev to revert; any other change
+# (a subagent's edit) keeps the profile out so the gate still catches it. An untracked profile, which
+# `git diff` does not show, is proposed for a commit first. /conclave:init asks when it composes a
+# profile, keeps the answer on `--force`, and reports the open question on an existing one. Nothing
+# executes these prompts, so the wording is guarded.
+WRITING_REL = "skills/writing-docs/SKILL.md"
+DOCS_WRITER_REL = "agents/docs-writer.md"
+INIT_REL = "skills/init/SKILL.md"
+TEMPLATE_REL = "templates/conclave.json"
+DIATAXIS_FILES = [SCHEMA_REL, TEMPLATE_REL, WRITING_REL, DOCS_WRITER_REL, LEAD_REL, INIT_REL]
+DIATAXIS_KEY = "`docs.diataxis`"
+DIATAXIS_HEADING = "## Diátaxis"
+DIATAXIS_DIRS = ["`tutorials/`", "`how-to/`", "`reference/`", "`explanation/`"]
+DIATAXIS_FALLBACK = "`docs/`"
+# The instruction itself: the option texts name `docs/` too, as a consequence, without writing it.
+DIATAXIS_ADD = f"add {DIATAXIS_FALLBACK}"
+# A directory entry of `docs.paths` is one that ends with `/`, as the scope gate reads it. The
+# instructions, not the option texts that also say it, carry these needles.
+PACK_DIRECTORY_ENTRY = "the first entry that ends with `/`"
+DIRECTORY_ENTRY = "no entry of `docs.paths` ends with `/`"
+WRITING_KEPT_HEADINGS = ["## Document kinds", "## Mermaid patterns"]
+WRITING_KEPT_TEXT = ["The plan document (`templates/plan.md`)"]
+PACK_RULES = [
+    ("deepest heading", "does not define the section that moves as the smallest one holding the edit"),
+    ("entry-point sections", "does not keep the README's entry-point sections in place"),
+    (PACK_DIRECTORY_ENTRY, "does not define a directory entry of `docs.paths` as one that ends with `/`"),
+]
+# Wording that counts a `docs.paths` entry without a trailing `/` as a directory, which the scope
+# gate compares as a single file.
+BARE_DIRECTORY = "directory in the tree"
+
+LEAD_RULES = [
+    ("Never ask when the key is present", "no longer says it never asks again"),
+    ("non-empty `docs.paths`", "is no longer limited to a non-empty `docs.paths`"),
+    (DIATAXIS_ADD, f"no longer adds {DIATAXIS_FALLBACK} to `docs.paths` on a yes"),
+    (DIRECTORY_ENTRY, "no longer adds `docs/` only when no entry of `docs.paths` ends with `/`"),
+]
+# Once the profile is named in `exec.lead_files`, the scope gate lets every edit to it through.
+LEAD_FILES_RULES = [
+    ("profile.base", "does not keep the profile in `exec.lead_files` while it differs from `profile.base`; a "
+                     "later task on the branch sends the answer to a dev to revert"),
+    ("changes nothing but lines you wrote", "names the profile in `exec.lead_files` whatever its diff holds, so a "
+                                            "subagent's edit to it passes the scope gate"),
+    ("untracked", "does not handle an untracked profile, which `git diff` does not show"),
+]
+
+BLOCK_START = re.compile(r"^(#|- |\||\d+\. |\*\*)")
+
+
+def blocks(text):
+    """The paragraphs, list items, headings and table rows of a Markdown text, each with its
+    continuation lines joined by spaces, so a rule wrapped over several lines reads as one."""
+    found = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            found.append("")
+        elif not found or not found[-1] or BLOCK_START.match(stripped):
+            found.append(stripped)
+        else:
+            found[-1] += " " + stripped
+    return [block for block in found if block]
+
+
+def block_with(text, *needles):
+    """The first block of text that contains every needle, or None."""
+    return next((b for b in blocks(text) if all(n in b for n in needles)), None)
+
+
+def diataxis_problems(texts):
+    """Every way the files in DIATAXIS_FILES (relative path -> text) drop the Diátaxis setting, one
+    message each, naming the file."""
+    problems = []
+    try:
+        docs = json.loads(texts[SCHEMA_REL])["properties"]["docs"]["properties"]
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        return [f"{SCHEMA_REL}: cannot read `properties.docs.properties` ({e!r})"]
+    setting = docs.get("diataxis")
+    if not isinstance(setting, dict):
+        problems.append(f"{SCHEMA_REL}: `docs` does not declare `diataxis`, the project's Diátaxis answer")
+    elif setting.get("type") != "boolean":
+        problems.append(f"{SCHEMA_REL}: `docs.diataxis` must be a boolean, found type {setting.get('type')!r}")
+    elif "default" in setting:
+        problems.append(f"{SCHEMA_REL}: `docs.diataxis` has a default ({setting['default']!r}); an absent key must "
+                        "mean the user has not been asked")
+    elif not str(setting.get("description", "")).strip():
+        problems.append(f"{SCHEMA_REL}: `docs.diataxis` has no description")
+
+    try:
+        template_docs = json.loads(texts[TEMPLATE_REL]).get("docs", {})
+    except (json.JSONDecodeError, AttributeError) as e:
+        problems.append(f"{TEMPLATE_REL}: cannot read `docs` ({e!r})")
+    else:
+        if "diataxis" in template_docs:
+            problems.append(f"{TEMPLATE_REL}: sets `docs.diataxis`; the answer is the user's, asked for each project")
+
+    writing_lines = [line.rstrip() for line in texts[WRITING_REL].splitlines()]
+    pack = section(writing_lines, DIATAXIS_HEADING)
+    if pack is None:
+        problems.append(f"{WRITING_REL}: no `{DIATAXIS_HEADING}` section")
+    else:
+        pack_text = " ".join(line.strip() for line in pack)
+        missing = [d for d in DIATAXIS_DIRS if d not in pack_text]
+        if missing:
+            problems.append(f"{WRITING_REL}: the `{DIATAXIS_HEADING}` section does not name {', '.join(missing)}")
+        for needle, why in PACK_RULES:
+            if needle not in pack_text:
+                problems.append(f"{WRITING_REL}: the `{DIATAXIS_HEADING}` section {why} (missing {needle!r})")
+        if BARE_DIRECTORY in pack_text:
+            problems.append(f"{WRITING_REL}: the `{DIATAXIS_HEADING}` section counts a `docs.paths` entry without a "
+                            "trailing `/` as a directory; the scope gate reads it as a single file")
+    lost = ([h for h in WRITING_KEPT_HEADINGS if h not in writing_lines]
+            + [t for t in WRITING_KEPT_TEXT if t not in texts[WRITING_REL]])
+    if lost:
+        problems.append(f"{WRITING_REL}: lost {', '.join(f'`{h}`' for h in lost)}")
+    if block_with(texts[WRITING_REL], "existing structure", "does not use Diátaxis") is None:
+        problems.append(f"{WRITING_REL}: the rule to keep the existing structure is not limited to a project that "
+                        "does not use Diátaxis")
+
+    writer_rule = block_with(texts[DOCS_WRITER_REL], DIATAXIS_KEY, "`conclave:writing-docs`", "`gaps`")
+    if DIATAXIS_KEY not in texts[DOCS_WRITER_REL]:
+        problems.append(f"{DOCS_WRITER_REL}: does not name {DIATAXIS_KEY}")
+    elif writer_rule is None:
+        problems.append(f"{DOCS_WRITER_REL}: no paragraph that names {DIATAXIS_KEY}, points to "
+                        "`conclave:writing-docs` and lists unfixable links under `gaps`")
+
+    lead_rule = block_with(texts[LEAD_REL], DIATAXIS_KEY, "AskUserQuestion")
+    if DIATAXIS_KEY not in texts[LEAD_REL]:
+        problems.append(f"{LEAD_REL}: does not name {DIATAXIS_KEY}")
+    elif lead_rule is None:
+        problems.append(f"{LEAD_REL}: no paragraph that names {DIATAXIS_KEY} and asks the question with "
+                        "AskUserQuestion")
+    else:
+        for needle, why in LEAD_RULES:
+            if needle not in lead_rule:
+                problems.append(f"{LEAD_REL}: the Diátaxis question {why} (missing {needle!r})")
+        if "`exec.lead_files`" not in lead_rule:
+            problems.append(f"{LEAD_REL}: the Diátaxis question no longer names the profile in `exec.lead_files`")
+        else:
+            for needle, why in LEAD_FILES_RULES:
+                if needle not in lead_rule:
+                    problems.append(f"{LEAD_REL}: the Diátaxis question {why} (missing {needle!r})")
+        if "of this task" in lead_rule:
+            problems.append(f"{LEAD_REL}: the Diátaxis question limits `exec.lead_files` to the task that asked "
+                            "(\"of this task\")")
+
+    for rel in (DOCS_WRITER_REL, LEAD_REL):
+        restated = [d for d in DIATAXIS_DIRS if d in texts[rel]]
+        if restated:
+            problems.append(f"{rel}: names {', '.join(restated)}; the framework's rules belong in {WRITING_REL}")
+
+    init_ask = block_with(texts[INIT_REL], DIATAXIS_KEY, "AskUserQuestion")
+    if init_ask is None:
+        problems.append(f"{INIT_REL}: does not ask the Diátaxis question with AskUserQuestion and write "
+                        f"{DIATAXIS_KEY} when it composes a profile")
+    else:
+        if DIATAXIS_ADD not in init_ask:
+            problems.append(f"{INIT_REL}: no longer adds {DIATAXIS_FALLBACK} to `docs.paths` on a yes")
+        if DIRECTORY_ENTRY not in init_ask:
+            problems.append(f"{INIT_REL}: no longer adds {DIATAXIS_FALLBACK} only when no entry of `docs.paths` ends "
+                            "with `/`")
+        if "`--force`" not in init_ask or "carry" not in init_ask:
+            problems.append(f"{INIT_REL}: does not carry an existing {DIATAXIS_KEY} over on `--force`")
+    if block_with(texts[INIT_REL], DIATAXIS_KEY, "still open") is None:
+        problems.append(f"{INIT_REL}: does not report the Diátaxis question as still open on an existing profile "
+                        f"without {DIATAXIS_KEY}")
+    return problems
+
+
+GOOD_DIATAXIS = {
+    SCHEMA_REL: json.dumps({"properties": {"docs": {"properties": {
+        "diataxis": {"type": "boolean", "description": "Whether the documentation follows Diátaxis."}}}}}),
+    TEMPLATE_REL: json.dumps({"docs": {"paths": ["docs/"]}}),
+    WRITING_REL: (
+        "## Structure\n"
+        "- In a project that does not use Diátaxis, and in sections a change does not touch,\n"
+        "  keep the document's existing structure.\n"
+        "## Mermaid patterns\n"
+        "## Document kinds\n"
+        "The plan document (`templates/plan.md`) is an analysis.\n"
+        f"{DIATAXIS_HEADING}\n"
+        "| Tutorial | `tutorials/` |\n| How-to | `how-to/` |\n| Reference | `reference/` |\n"
+        "| Explanation | `explanation/` |\n"
+        "Under the first entry that ends with `/`.\n"
+        "3. Move the smallest section: from the deepest heading above the edit.\n"
+        "4. Never move the README's entry-point sections.\n"),
+    DOCS_WRITER_REL: (
+        "## Where the text goes\n\n"
+        f"When {DIATAXIS_KEY} is `true`, follow the \"Diátaxis\" section of `conclave:writing-docs`;\n"
+        "list links you may not fix under `gaps`.\n"),
+    LEAD_REL: (
+        f"4. When the profile has a non-empty `docs.paths` and no {DIATAXIS_KEY}, ask with AskUserQuestion; on a "
+        f"yes, when no entry of `docs.paths` ends with `/`, add "
+        f"{DIATAXIS_FALLBACK}. Never ask when the key is present. Name the "
+        "profile in `exec.lead_files` while `git diff <profile.base>` changes nothing but lines you wrote; propose "
+        "committing an untracked profile.\n"),
+    INIT_REL: (
+        f"3. When the profile has no {DIATAXIS_KEY}, say the question is still open.\n\n"
+        f"Ask with AskUserQuestion and write {DIATAXIS_KEY}; on a yes, when no entry of `docs.paths` ends with "
+        f"`/`, add {DIATAXIS_FALLBACK}. With `--force`, "
+        "carry the old value over.\n"),
+}
+
+
+def diataxis_case(rel, *pairs):
+    """GOOD_DIATAXIS with each (old, new) pair of `pairs`, given flat, replaced once in rel."""
+    text = GOOD_DIATAXIS[rel]
+    for old, new in zip(pairs[::2], pairs[1::2]):
+        assert old in text, (rel, old)
+        text = text.replace(old, new, 1)
+    return {**GOOD_DIATAXIS, rel: text}
+
+
+def diataxis_schema_case(**setting):
+    schema = json.loads(GOOD_DIATAXIS[SCHEMA_REL])
+    properties = schema["properties"]["docs"]["properties"]
+    if setting:
+        properties["diataxis"] = setting
+    else:
+        del properties["diataxis"]
+    return {**GOOD_DIATAXIS, SCHEMA_REL: json.dumps(schema)}
+
+
+BAD_DIATAXIS = {
+    "`diataxis` missing from the schema": (diataxis_schema_case(), "does not declare `diataxis`"),
+    "`diataxis` not a boolean": (
+        diataxis_schema_case(type="string", description="x"), "`docs.diataxis` must be a boolean"),
+    "`diataxis` with a default": (
+        diataxis_schema_case(type="boolean", default=True, description="x"), "`docs.diataxis` has a default"),
+    "`diataxis` with a false default": (
+        diataxis_schema_case(type="boolean", default=False, description="x"), "`docs.diataxis` has a default"),
+    "`diataxis` without a description": (diataxis_schema_case(type="boolean"), "`docs.diataxis` has no description"),
+    "the profile template answers the question": (
+        diataxis_case(TEMPLATE_REL, '["docs/"]}', '["docs/"], "diataxis": true}'),
+        f"{TEMPLATE_REL}: sets `docs.diataxis`"),
+    "the pack without its Diátaxis section": (
+        diataxis_case(WRITING_REL, DIATAXIS_HEADING + "\n", "## Kinds\n"), f"{WRITING_REL}: no `{DIATAXIS_HEADING}`"),
+    "the pack without `how-to/`": (
+        diataxis_case(WRITING_REL, "`how-to/`", "`guides/`"), "does not name `how-to/`"),
+    "the pack without `explanation/`": (
+        diataxis_case(WRITING_REL, "`explanation/`", "`background/`"), "does not name `explanation/`"),
+    # The directory names count only inside the section: one moved above it is missing from it.
+    "a directory named only outside the Diátaxis section": (
+        diataxis_case(WRITING_REL, "`tutorials/`", "`lessons/`", "## Mermaid patterns\n",
+                      "## Mermaid patterns\nSee `tutorials/`.\n"),
+        "does not name `tutorials/`"),
+    "the pack without its Document kinds": (
+        diataxis_case(WRITING_REL, "## Document kinds\n", ""), "lost `## Document kinds`"),
+    "the pack without its Mermaid patterns": (
+        diataxis_case(WRITING_REL, "## Mermaid patterns\n", ""), "lost `## Mermaid patterns`"),
+    "the pack without its plan-document paragraph": (
+        diataxis_case(WRITING_REL, "The plan document (`templates/plan.md`)", "Plans"),
+        "lost `The plan document (`templates/plan.md`)`"),
+    # A one-line edit inside a large chapter must not carry the whole chapter.
+    "the pack moving a whole chapter": (
+        diataxis_case(WRITING_REL, "the smallest section: from the deepest heading above the edit",
+                      "the whole section"),
+        "smallest one holding the edit"),
+    "the pack moving the README's entry point": (
+        diataxis_case(WRITING_REL, "4. Never move the README's entry-point sections.\n", ""),
+        "entry-point sections in place"),
+    # The scope gate prefix-matches only an entry ending with `/`: the directories under a bare
+    # `docs` entry are out of scope and sent to a dev to revert.
+    "the pack without its directory-entry rule": (
+        diataxis_case(WRITING_REL, PACK_DIRECTORY_ENTRY, "the first directory"), "one that ends with `/`"),
+    "the pack counting a bare entry as a directory": (
+        diataxis_case(WRITING_REL, PACK_DIRECTORY_ENTRY, PACK_DIRECTORY_ENTRY + " or names a directory in the tree"),
+        "counts a `docs.paths` entry without a trailing `/`"),
+    "the keep-the-structure rule left unscoped": (
+        diataxis_case(WRITING_REL, "In a project that does not use Diátaxis, and in sections a change does not touch,",
+                      "Always"), "not limited to a project that does not use Diátaxis"),
+    "docs-writer.md without the key": (
+        diataxis_case(DOCS_WRITER_REL, DIATAXIS_KEY, "the setting"), f"{DOCS_WRITER_REL}: does not name"),
+    "docs-writer.md without the pack section": (
+        diataxis_case(DOCS_WRITER_REL, "`conclave:writing-docs`", "your judgement"),
+        "points to `conclave:writing-docs`"),
+    "docs-writer.md without the link report": (
+        diataxis_case(DOCS_WRITER_REL, "under `gaps`", "nowhere"), "lists unfixable links under `gaps`"),
+    "docs-writer.md restating a directory": (
+        diataxis_case(DOCS_WRITER_REL, "list links", "put guides in `how-to/`; list links"),
+        f"{DOCS_WRITER_REL}: names `how-to/`"),
+    "lead.md without the key": (diataxis_case(LEAD_REL, DIATAXIS_KEY, "the setting"), f"{LEAD_REL}: does not name"),
+    "lead.md without the question": (
+        diataxis_case(LEAD_REL, "ask with AskUserQuestion", "set it to true"),
+        "asks the question with AskUserQuestion"),
+    "lead.md asking again when the key is present": (
+        diataxis_case(LEAD_REL, " Never ask when the key is present.", ""), "no longer says it never asks again"),
+    "lead.md without the profile in lead_files": (
+        diataxis_case(LEAD_REL, " Name the profile in `exec.lead_files` while `git diff <profile.base>` changes "
+                                "nothing but lines you wrote; propose committing an untracked profile.", ""),
+        "no longer names the profile"),
+    # Without a content condition every profile edit, a subagent's included, passes the scope gate.
+    "lead.md naming the profile in lead_files whatever its diff holds": (
+        diataxis_case(LEAD_REL, "changes nothing but lines you wrote", "shows a change"),
+        "whatever its diff holds"),
+    "lead.md without the untracked profile": (
+        diataxis_case(LEAD_REL, "; propose committing an untracked profile.", "."), "an untracked profile"),
+    # The scope gate compares with profile.base, commits included: the answer an earlier task on the
+    # branch committed must stay allowed, or the next task sends it to a dev to revert.
+    "lead.md keeping the profile in lead_files apart from the base diff": (
+        diataxis_case(LEAD_REL, "<profile.base>", "<HEAD>"), "while it differs from `profile.base`"),
+    "lead.md keeping the profile in lead_files for the asking task only": (
+        diataxis_case(LEAD_REL, "lines you wrote;", "lines you wrote, of this task;"),
+        "limits `exec.lead_files` to the task that asked"),
+    "lead.md asking with an empty docs.paths": (
+        diataxis_case(LEAD_REL, "a non-empty `docs.paths`", "`docs.paths`"), "limited to a non-empty `docs.paths`"),
+    "lead.md without the docs/ fallback": (
+        diataxis_case(LEAD_REL, f", add {DIATAXIS_FALLBACK}", ""), f"no longer adds {DIATAXIS_FALLBACK} to"),
+    "lead.md adding docs/ beside a bare directory entry": (
+        diataxis_case(LEAD_REL, DIRECTORY_ENTRY, "no entry is a directory"),
+        "only when no entry of `docs.paths` ends with `/`"),
+    "lead.md restating a directory": (
+        diataxis_case(LEAD_REL, "ask with", "ask, naming `reference/`, with"), f"{LEAD_REL}: names `reference/`"),
+    "init without the question": (
+        diataxis_case(INIT_REL, "Ask with AskUserQuestion", "Set it"), f"{INIT_REL}: does not ask"),
+    "init without the open question": (
+        diataxis_case(INIT_REL, "is still open", "is answered"), f"{INIT_REL}: does not report"),
+    "init without the docs/ fallback": (
+        diataxis_case(INIT_REL, DIATAXIS_ADD, "write it"),
+        f"{INIT_REL}: no longer adds {DIATAXIS_FALLBACK} to"),
+    "init adding docs/ beside a bare directory entry": (
+        diataxis_case(INIT_REL, DIRECTORY_ENTRY, "no entry is a directory"),
+        f"{INIT_REL}: no longer adds {DIATAXIS_FALLBACK} only when"),
+    "init asking again on --force": (
+        diataxis_case(INIT_REL, "carry the old value over", "ask again"), "over on `--force`"),
+}
+
+errors_before_diataxis = len(errors)
+if diataxis_problems(GOOD_DIATAXIS):
+    fail(f"diataxis check rejects valid files: {diataxis_problems(GOOD_DIATAXIS)}")
+for case, (texts, expected) in BAD_DIATAXIS.items():
+    got = diataxis_problems(texts)
+    if len(got) != 1 or expected not in got[0]:
+        fail(f"diataxis check on {case}: expected one problem containing {expected!r}, got {got}")
+for problem in diataxis_problems({rel: (PLUGIN / rel).read_text() for rel in DIATAXIS_FILES}):
+    fail(problem)
+if len(errors) == errors_before_diataxis:
+    ok(f"docs.diataxis is a boolean without a default, the pack has its Diátaxis section, the docs-writer, the lead "
+       f"and init name the key without restating the rules ({len(BAD_DIATAXIS)} bad variants rejected)")
+
+
+# The schema is what /conclave:init validates a profile against: an answered question (`true` or
+# `false`) must validate, an answer of any other type must not, and an unanswered one (the template)
+# already validates above.
+errors_before_diataxis_schema = len(errors)
+try:
+    import jsonschema
+
+    for answer in (True, False):
+        profile = json.loads(json.dumps(template))
+        profile.setdefault("docs", {})["diataxis"] = answer
+        try:
+            jsonschema.validate(profile, schema)
+        except jsonschema.ValidationError as e:
+            fail(f"{SCHEMA_REL}: a profile answering `docs.diataxis: {json.dumps(answer)}` does not validate: "
+                 f"{e.message}")
+    for answer in ("yes", "true", 1, None, ["docs/"]):
+        profile = json.loads(json.dumps(template))
+        profile.setdefault("docs", {})["diataxis"] = answer
+        try:
+            jsonschema.validate(profile, schema)
+        except jsonschema.ValidationError:
+            continue
+        fail(f"{SCHEMA_REL}: a profile with `docs.diataxis: {json.dumps(answer)}` validates; only a boolean answers "
+             "the question")
+except ImportError:
+    pass  # reported once above
+if len(errors) == errors_before_diataxis_schema:
+    ok("a profile validates with `docs.diataxis` true or false and is rejected with any other type")
+
+
+# The rest of what the acceptance criteria ask of the Diátaxis wording, past the guard above: the
+# pack gives each kind what its reader needs, what it contains and what it leaves out, says how to
+# tell the kinds apart, creates a missing directory with an index file, leaves a pointer where a
+# section moved from, moves nothing else, fixes links inside `docs.paths` and lists the others with
+# file and line, and makes misfiled text an audit finding. The docs-writer keeps "match the voice
+# and density" for a project without Diátaxis, says its Diátaxis section does not apply when the
+# key is `false` or absent, carries the link rule and the audit finding, and moves nothing else. The
+# lead and init offer yes as the recommended answer with each option's consequence; the lead asks at
+# T1 or above and says what it wrote. Neither agent restates a rule that only the pack states.
+REACH_FILES = [WRITING_REL, DOCS_WRITER_REL, LEAD_REL, INIT_REL]
+REACH_PACK = [
+    ("| Tutorial |", "does not describe the tutorial kind"),
+    ("| How-to guide |", "does not describe the how-to guide kind"),
+    ("| Reference |", "does not describe the reference kind"),
+    ("| Explanation |", "does not describe the explanation kind"),
+    ("The reader needs", "does not say what the reader of each kind needs"),
+    ("The document contains", "does not say what each kind contains"),
+    ("It leaves out", "does not say what each kind leaves out"),
+    ("learning or working", "does not say how to tell the kinds apart (learning or working)"),
+    ("to do something or to know something", "does not say how to tell the kinds apart (do or know)"),
+    ("index file", "does not create a missing directory with an index file"),
+    ("points to the new place", "does not leave a line pointing to a moved section's new place"),
+    ("Move nothing else", "does not forbid moving anything else"),
+    ("never in one pass", "does not forbid reorganising the documentation in one pass"),
+    ("inside `docs.paths`", "does not update the links to moved text inside `docs.paths`"),
+    ("with file and line", "does not list the links outside `docs.paths` with file and line"),
+    ("directory of the wrong kind", "does not make text in the directory of the wrong kind an audit finding"),
+]
+REACH_WRITER = [
+    ("`false` or absent", "does not say its Diátaxis instructions do not apply when the key is `false` or absent"),
+    ("inside `docs.paths`", "does not update the links to moved text inside `docs.paths`"),
+    ("with file and line", "does not list the links it may not fix with file and line"),
+    ("never anything else", "does not forbid moving anything the pack does not allow"),
+]
+WRITER_VOICE = "Match the voice and density of the surrounding text."
+REACH_ASK = [
+    ("recommended", "does not recommend an answer"),
+    ("yes (", "does not give the consequence of yes"),
+    ("no (", "does not give the consequence of no"),
+]
+REACH_LEAD = [
+    ("T1 or above", "is not limited to a task at T1 or above"),
+    ("Say in one line what you wrote", "does not tell the user what it wrote into the profile"),
+]
+REACH_INIT = [("`true` or `false`", "does not write the answer as `true` or `false`")]
+# Rules only the pack states: an agent that carries one has restated the framework.
+PACK_ONLY = ["deepest heading", "entry-point sections", "index file", "Moved to [", "learning or working",
+             "It leaves out"]
+
+
+def diataxis_reach_problems(texts):
+    """Every way the files in REACH_FILES (relative path -> text) drop a behaviour the Diátaxis
+    acceptance criteria name, one message each, naming the file."""
+    problems = []
+    pack = section([line.rstrip() for line in texts[WRITING_REL].splitlines()], DIATAXIS_HEADING)
+    if pack is None:
+        problems.append(f"{WRITING_REL}: no `{DIATAXIS_HEADING}` section")
+    else:
+        pack_text = " ".join(line.strip() for line in pack)
+        for needle, why in REACH_PACK:
+            if needle not in pack_text:
+                problems.append(f"{WRITING_REL}: the `{DIATAXIS_HEADING}` section {why} (missing {needle!r})")
+
+    writer = texts[DOCS_WRITER_REL]
+    writer_lines = [line.rstrip() for line in writer.splitlines()]
+    how = section(writer_lines, "## How you write")
+    if how is None or WRITER_VOICE not in " ".join(how):
+        problems.append(f"{DOCS_WRITER_REL}: \"How you write\" no longer says {WRITER_VOICE!r}")
+    writer_rule = block_with(writer, DIATAXIS_KEY, "`conclave:writing-docs`")
+    if writer_rule is None:
+        problems.append(f"{DOCS_WRITER_REL}: no paragraph that names {DIATAXIS_KEY} and points to "
+                        "`conclave:writing-docs`")
+    else:
+        for needle, why in REACH_WRITER:
+            if needle not in writer_rule:
+                problems.append(f"{DOCS_WRITER_REL}: the Diátaxis paragraph {why} (missing {needle!r})")
+    audit = section(writer_lines, "## As auditor")
+    audit_text = " ".join(audit or [])
+    if DIATAXIS_KEY not in audit_text or "wrong kind" not in audit_text:
+        problems.append(f"{DOCS_WRITER_REL}: \"As auditor\" does not make text in the directory of the wrong kind a "
+                        f"finding when {DIATAXIS_KEY} is `true`")
+
+    for rel, extra in ((LEAD_REL, REACH_LEAD), (INIT_REL, REACH_INIT)):
+        ask = block_with(texts[rel], DIATAXIS_KEY, "AskUserQuestion")
+        if ask is None:
+            problems.append(f"{rel}: no paragraph that names {DIATAXIS_KEY} and asks with AskUserQuestion")
+            continue
+        for needle, why in REACH_ASK + extra:
+            if needle not in ask:
+                problems.append(f"{rel}: the Diátaxis question {why} (missing {needle!r})")
+
+    for rel in (DOCS_WRITER_REL, LEAD_REL):
+        restated = [p for p in PACK_ONLY if p in texts[rel]]
+        if restated:
+            problems.append(f"{rel}: states {', '.join(repr(p) for p in restated)}, a rule of the pack's "
+                            f"`{DIATAXIS_HEADING}` section")
+    return problems
+
+
+GOOD_REACH = {
+    WRITING_REL: (
+        f"{DIATAXIS_HEADING}\n"
+        "| Kind | The reader needs | The document contains | It leaves out | Directory |\n"
+        "| Tutorial | x |\n| How-to guide | x |\n| Reference | x |\n| Explanation | x |\n"
+        "Ask: is the reader learning or working, and do they need\n"
+        "to do something or to know something?\n"
+        "Move text as tasks touch it, never in one pass.\n"
+        "2. Create a missing directory with a short index file.\n"
+        "3. Keep one line that points to the new place.\n"
+        "4. Move nothing else.\n"
+        "5. Update the links inside `docs.paths`; list the others under `gaps` with file and line.\n"
+        "In audit mode, text in the directory of the wrong kind is a finding.\n"
+        "## Mermaid patterns\n"),
+    DOCS_WRITER_REL: (
+        "## How you write\n\n"
+        f"{WRITER_VOICE} Name endpoints.\n\n"
+        "## Where the text goes\n\n"
+        f"When {DIATAXIS_KEY} is `true`, follow the \"Diátaxis\" section of `conclave:writing-docs`, never\n"
+        "anything else. Update links inside `docs.paths`; list the others under `gaps` with file and line.\n"
+        f"When {DIATAXIS_KEY} is `false` or absent, this section does not apply.\n\n"
+        "## As auditor\n\n"
+        f"When {DIATAXIS_KEY} is `true`, text in the directory of the wrong kind is a finding.\n\n"
+        "## What you return\n"),
+    LEAD_REL: (
+        f"4. When the profile has no {DIATAXIS_KEY} and the task is at T1 or above, ask with AskUserQuestion.\n"
+        "   Options, recommended first: yes (four directories) or no (existing structure). Say in one line\n"
+        "   what you wrote.\n"),
+    INIT_REL: (
+        f"Ask with AskUserQuestion, recommended first: yes (four directories) or no (existing structure).\n"
+        f"Write {DIATAXIS_KEY}, `true` or `false`.\n"),
+}
+
+
+def reach_case(rel, old, new):
+    text = GOOD_REACH[rel]
+    assert old in text, (rel, old)
+    return {**GOOD_REACH, rel: text.replace(old, new, 1)}
+
+
+BAD_REACH = {
+    "the pack without the tutorial kind": (
+        reach_case(WRITING_REL, "| Tutorial |", "| Lesson |"), "the tutorial kind"),
+    "the pack without the explanation kind": (
+        reach_case(WRITING_REL, "| Explanation |", "| Background |"), "the explanation kind"),
+    "the pack without what the reader needs": (
+        reach_case(WRITING_REL, "The reader needs", "Audience"), "what the reader of each kind needs"),
+    "the pack without what each kind contains": (
+        reach_case(WRITING_REL, "The document contains", "Content"), "what each kind contains"),
+    "the pack without what each kind leaves out": (
+        reach_case(WRITING_REL, "It leaves out", "Notes"), "what each kind leaves out"),
+    "the pack without the learning-or-working test": (
+        reach_case(WRITING_REL, "learning or working", "new"), "(learning or working)"),
+    "the pack without the do-or-know test": (
+        reach_case(WRITING_REL, "to do something or to know something", "help"), "(do or know)"),
+    "the pack creating a directory without an index": (
+        reach_case(WRITING_REL, "with a short index file", "as needed"), "with an index file"),
+    "the pack moving a section without a pointer": (
+        reach_case(WRITING_REL, "Keep one line that points to the new place.", "Delete the old text."),
+        "pointing to a moved section's new place"),
+    "the pack moving more than the edit": (
+        reach_case(WRITING_REL, "4. Move nothing else.\n", "4. Move neighbouring sections too.\n"),
+        "forbid moving anything else"),
+    "the pack reorganising in one pass": (
+        reach_case(WRITING_REL, "as tasks touch it, never in one pass", "all at once"), "in one pass"),
+    "the pack leaving links inside docs.paths broken": (
+        reach_case(WRITING_REL, "Update the links inside `docs.paths`; list", "List"), "inside `docs.paths`"),
+    "the pack listing outside links without file and line": (
+        reach_case(WRITING_REL, " with file and line.", "."), "with file and line"),
+    "the pack without the audit finding": (
+        reach_case(WRITING_REL, "In audit mode, text in the directory of the wrong kind is a finding.\n", ""),
+        "an audit finding"),
+    "docs-writer.md without its voice rule": (
+        reach_case(DOCS_WRITER_REL, WRITER_VOICE, "Write freely."), "no longer says"),
+    "docs-writer.md applying Diátaxis when the key is false": (
+        reach_case(DOCS_WRITER_REL, f"When {DIATAXIS_KEY} is `false` or absent, this section does not apply.\n", ""),
+        "`false` or absent"),
+    "docs-writer.md leaving links inside docs.paths broken": (
+        reach_case(DOCS_WRITER_REL, "Update links inside `docs.paths`; list", "List"), "inside `docs.paths`"),
+    "docs-writer.md listing links without file and line": (
+        reach_case(DOCS_WRITER_REL, " with file and line.", "."), "with file and line"),
+    "docs-writer.md moving more than the pack allows": (
+        reach_case(DOCS_WRITER_REL, ", never\nanything else.", "."), "forbid moving anything"),
+    "docs-writer.md auditing without the wrong-kind finding": (
+        reach_case(DOCS_WRITER_REL, f"When {DIATAXIS_KEY} is `true`, text in the directory of the wrong kind is a "
+                                    "finding.\n\n", ""), "\"As auditor\" does not make"),
+    "lead.md without a recommended answer": (
+        reach_case(LEAD_REL, "recommended first", "in any order"), f"{LEAD_REL}: the Diátaxis question does not "
+                                                                   "recommend"),
+    "lead.md without the consequence of no": (
+        reach_case(LEAD_REL, "no (existing structure)", "no"), f"{LEAD_REL}: the Diátaxis question does not give "
+                                                                "the consequence of no"),
+    "lead.md asking at T0": (
+        reach_case(LEAD_REL, "the task is at T1 or above", "any task"), "T1 or above"),
+    "lead.md writing the profile silently": (
+        reach_case(LEAD_REL, " Say in one line\n   what you wrote.", ""), "what it wrote into the profile"),
+    "lead.md restating a pack rule": (
+        reach_case(LEAD_REL, "(four directories)", "(four directories, each with an index file)"),
+        f"{LEAD_REL}: states 'index file'"),
+    "docs-writer.md restating a pack rule": (
+        reach_case(DOCS_WRITER_REL, "Name endpoints.", "Move from the deepest heading."),
+        f"{DOCS_WRITER_REL}: states 'deepest heading'"),
+    "init without a recommended answer": (
+        reach_case(INIT_REL, "recommended first", "in any order"), f"{INIT_REL}: the Diátaxis question does not "
+                                                                   "recommend"),
+    "init without the consequence of yes": (
+        reach_case(INIT_REL, "yes (four directories)", "yes"), f"{INIT_REL}: the Diátaxis question does not give "
+                                                                 "the consequence of yes"),
+    "init writing something other than a boolean": (
+        reach_case(INIT_REL, "`true` or `false`", "\"yes\" or \"no\""), "as `true` or `false`"),
+}
+
+errors_before_reach = len(errors)
+if diataxis_reach_problems(GOOD_REACH):
+    fail(f"diataxis reach check rejects valid files: {diataxis_reach_problems(GOOD_REACH)}")
+for case, (texts, expected) in BAD_REACH.items():
+    got = diataxis_reach_problems(texts)
+    if len(got) != 1 or expected not in got[0]:
+        fail(f"diataxis reach check on {case}: expected one problem containing {expected!r}, got {got}")
+for problem in diataxis_reach_problems({rel: (PLUGIN / rel).read_text() for rel in REACH_FILES}):
+    fail(problem)
+if len(errors) == errors_before_reach:
+    ok(f"the Diátaxis pack, docs-writer, lead and init carry every behaviour the acceptance names "
+       f"({len(BAD_REACH)} bad variants rejected)")
 
 if "--base" in sys.argv:
     base = sys.argv[sys.argv.index("--base") + 1]

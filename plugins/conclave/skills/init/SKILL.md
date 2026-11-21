@@ -10,8 +10,9 @@ Arguments: `$ARGUMENTS`. If the file already exists and `--force` is not given, 
 
 1. Validate it against `${CLAUDE_PLUGIN_ROOT}/schemas/conclave.schema.json` (same command as in step 2) and report any error with the path of the offending key.
 2. Compare it with `${CLAUDE_PLUGIN_ROOT}/templates/conclave.json` and list the keys the template has that the profile lacks, one line each with what it does (from the schema `description`). These are features added by a newer Conclave; they are optional and default to off.
-3. Check that every command in `checks`, `build` and `e2e` still exists (the script or binary is there) and that every `paths` entry still exists; report what moved.
-4. Stop. The user edits the profile, or runs `/conclave:init --force` to regenerate it.
+3. When the profile has no `docs.diataxis` key, say that the documentation layout question (does the project's documentation follow Diátaxis?) is still open, and that the lead will ask it at the next task at T1 or above when `docs.paths` is non-empty. Do not ask it here and do not write the key.
+4. Check that every command in `checks`, `build` and `e2e` still exists (the script or binary is there) and that every `paths` entry still exists; report what moved.
+5. Stop. The user edits the profile, or runs `/conclave:init --force` to regenerate it.
 
 ## 1. Scan
 
@@ -31,7 +32,11 @@ Read before you guess; name only paths and commands you verified exist.
 
 ## 2. Compose
 
-Start from `${CLAUDE_PLUGIN_ROOT}/templates/conclave.json` and keep only what applies. Validate against `${CLAUDE_PLUGIN_ROOT}/schemas/conclave.schema.json`:
+Start from `${CLAUDE_PLUGIN_ROOT}/templates/conclave.json` and keep only what applies.
+
+Ask the user one question with AskUserQuestion: does the project's documentation follow Diátaxis? Options, recommended first: yes (the documentation agent files what it writes in four directories by kind, as the "Diátaxis" section of `conclave:writing-docs` says, and moves older text there in small steps, only when a task edits it; `docs/` joins `docs.paths` when none of its entries ends with `/`) or no (it keeps the documentation's existing structure). Write the answer as `docs.diataxis`, `true` or `false`; on a yes, when no entry of `docs.paths` ends with `/` (the scope gate reads an entry without one as a single file), add `docs/` to it and say so in the report. It is the user's decision for this project, so never set it without asking. With `--force` over a profile that already has `docs.diataxis`, read that value before you overwrite the file, carry it over without asking, and apply the same `docs/` rule when it is `true`.
+
+Validate against `${CLAUDE_PLUGIN_ROOT}/schemas/conclave.schema.json`:
 
 ```bash
 python3 -c "import json,sys; from jsonschema import validate; validate(json.load(open('.claude/conclave.json')), json.load(open(sys.argv[1])))" "${CLAUDE_PLUGIN_ROOT}/schemas/conclave.schema.json"
@@ -50,4 +55,4 @@ Write `.claude/conclave.json` (create `.claude/` if needed). Then print, in this
 3. Commands you listed but could not run to confirm (missing venv, missing node_modules), one line each.
 4. If `.claude/agents/` or `.claude/workflows/dev-team.js` exist in this project: say that the Conclave plugin replaces that local team, list those files as candidates for deletion, and note that the "Agent team" section of CLAUDE.md should point at `/conclave` instead. Do not delete anything.
 
-Do not ask questions; the user edits the file afterwards.
+Ask no question other than the documentation layout one under Compose; the user edits the file afterwards.

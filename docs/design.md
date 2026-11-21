@@ -80,6 +80,19 @@ While it is `false` the lead adds the plans directory to `.gitignore` and no com
 holds the plan document; `true` puts the plan in the first slice. See "Plan documents stay
 local".
 
+`docs.diataxis` is a boolean with no default: the project user's yes or no on whether
+its documentation follows Diátaxis; absent means not asked yet. `/conclave:init` asks for
+a new profile (yes recommended) and carries an existing answer over on `--force`; on an
+existing profile without the key it reports the question as open and writes nothing. The
+lead asks once, with AskUserQuestion, at the first task at T1 or above when `docs.paths`
+is not empty, writes the answer and says so; it never asks when the key is present. A yes
+adds `docs/` to `docs.paths` when no entry ends with `/` (the scope gate reads an entry
+without the slash as one file). The lead names `.claude/conclave.json` in
+`exec.lead_files` only while its difference from `profile.base` is the answer, that
+`docs/` entry or a profile fix the user approved; any other change keeps it out so the
+scope gate catches it, and an untracked profile is proposed for a commit first. See
+"Documentation presentation".
+
 ### Execution plan (`exec`, built by the lead, consumed by `workflows/dev-team.js`)
 
 ```js
@@ -439,7 +452,9 @@ ends with `/`, glob otherwise), else `docs-writer` for `docs.paths`, else `devop
 The docs-writer and the lead load one pack that says how each kind of document is
 structured, when a table or a code block beats prose, when a diagram earns its place, and
 the Mermaid patterns to use (flowchart, sequenceDiagram, stateDiagram-v2, erDiagram) with
-the syntax that bites. The analysis and a design study may each return `diagrams` (title, kind, mermaid); the
+the syntax that bites. The same pack carries the Diátaxis section: the four kinds and their
+directories, how to tell which kind a text is, and the small-step rule, applied when
+`docs.diataxis` is `true`. The analysis and a design study may each return `diagrams` (title, kind, mermaid); the
 lead places the analysis's under Analysis > Current state and the study's under Technical
 spec > Proposed model. In audit mode a stale diagram is a finding like a stale sentence. The stages, drawn the way
 the pack asks:
@@ -455,6 +470,24 @@ stateDiagram-v2
     ready --> done: commits land
     planning --> stopped: user abandons
 ```
+
+### Diátaxis for the project's documentation
+
+When `docs.diataxis` is `true`, the pack's "Diátaxis" section applies; agent bodies only
+name the key and the section. The four kinds (tutorial, how-to guide, reference,
+explanation) each have a directory (`tutorials/`, `how-to/`, `reference/`, `explanation/`)
+under the first `docs.paths` entry that ends with `/`, or `docs/`. A missing directory is
+created with an index file (`README.md`, or `index.md` to match the project). Small-step
+rule: new text goes in the directory of its kind; a section of an older document moves
+only when the change makes the docs-writer edit it, and then only the smallest section
+holding the edit (deepest heading above it to the next heading), leaving the heading with
+a one-line pointer; nothing else moves. The README's entry-point sections, the plans
+directory, the roadmap and changelogs never move. Links to moved text are updated inside
+`docs.paths` and listed under `gaps` with file and line when they sit in a file the
+docs-writer may not edit. In audit mode, text in the directory of the wrong kind is a
+finding naming the kind it belongs to. When the key is `false` or absent the docs-writer
+keeps the document's existing structure. This repository does not use it, and its own
+documentation stays as it is.
 
 ## Stack packs (`skills/stack-<name>/SKILL.md`)
 

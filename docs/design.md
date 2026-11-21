@@ -19,9 +19,10 @@ pieces; agent files, skills and workflow scripts all follow it.
 4. **Nobody commits but the user.** Subagents never run `git commit`. The lead proposes a
    commit message and waits for approval.
 5. **Plan first, functional over technical.** Every task at T1 and above is written down
-   in a plan document whose functional spec (why, goals, non-goals, acceptance, decisions)
-   comes first and is what the user approves; the technical spec (current state, proposed
-   model, alternatives, briefs, contracts, failure matrix) serves it. Nothing is built
+   in a plan document that opens with an analysis (request, current state, constraints,
+   unknowns), then the functional spec (why, goals, non-goals, acceptance, decisions),
+   which is what the user approves; the technical spec (proposed model, alternatives,
+   briefs, contracts, failure matrix) serves it. Nothing is built
    before the approval, at any pace. A brief, a design or a finding that traces to no goal
    or acceptance criterion is out of scope.
 
@@ -123,11 +124,45 @@ Every decision item, from the design study, the pm or the architect, is
 a plain string option is accepted but carries no consequence. The lead presents each
 option with its consequence and writes `Chosen:` into the plan document.
 
+### The analysis checkpoint
+
+Before any goal or brief, the lead writes the Analysis section of the plan document at T1
+and T2 from its own reading of the files the task touches: Request, Current state (each
+claim with a file reference), Constraints (each with where it is written) and Unknowns.
+It then re-triages, since the tier came from a grep and the Analysis is the first real
+reading; a changed tier is printed, recorded in the Tier line and run JSON, and logged.
+The re-triage never goes below T1, because the plan document already exists, and keeps a
+tier the user set with `--tier N` (the lead says what the Analysis found and asks).
+
+| Tier | Analysis | Stops |
+|---|---|---|
+| T1 | written by the lead, then the specs right after | one: the approval gate, whose summary opens with the Analysis; approval marks the `analysis checkpoint` step confirmed and ticks `approved by the user` |
+| T2 | written by the lead | two: the checkpoint (Analysis summary of at most five lines and its Unknowns; Functional spec and Briefs still hold placeholders, Status stays `planning`), then the approval gate |
+| T3 | not written separately; Current state comes from `design_study.current_state` when a design study ran, other subsections hold `(no separate analysis at this tier: see the briefs)` | the approval gate only, which ticks `approved by the user` and marks the checkpoint skipped |
+
+The step's outcome is written after a colon in the Steps list:
+
+```
+- [x] analysis checkpoint: confirmed by the user
+- [x] analysis checkpoint: skipped, no separate analysis at T3
+- [x] analysis checkpoint: skipped, plan-only run
+```
+
+A plan-only run (`/conclave:plan`) follows the T3 rule at any tier, because the plan stage
+writes the specs: no Analysis before it, no stop, and the step is marked
+`skipped, plan-only run` when `plan` is ticked.
+
+No workflow script, return shape or Status value changes: the checkpoint is a lead
+procedure. `/conclave:continue` resumes a T2 run with the `analysis checkpoint` step
+unticked at the checkpoint, not at the approval gate; a document without that step is
+treated as past it.
+
 ### The approval gate
 
 The build stage is never launched, at any pace, until the user has approved the plan
 document. The lead writes the Functional and Technical specs (itself at T1 and T2, from
-the plan stage at T3), shows the Functional spec, and waits. Status moves `planning` →
+the plan stage at T3; at T2 only after the analysis checkpoint), shows the Functional
+spec, and waits. Status moves `planning` →
 `approved` on the user's word → `building` on launch. Pace governs only the pauses after
 build, review and finish.
 
@@ -179,7 +214,7 @@ reads both and launches the next stage, in this session or a later one.
 
 Pace is the lead's setting, from `--pace` on the command, else `profile.pace`, else
 `step`: `step` pauses after every stage, `plan` only after the plan, `auto` launches
-`stage: "all"` and pauses only on decisions. T1 always pauses once, after the brief is
+`stage: "all"` and pauses only on decisions. T1 always pauses once, after the Analysis and the brief are
 written and before any code; T0 has no plan document.
 
 ### What every subagent prompt contains
@@ -261,8 +296,9 @@ The docs-writer and the lead load one pack that says how each kind of document i
 structured, when a table or a code block beats prose, when a diagram earns its place, and
 the Mermaid patterns to use (flowchart, sequenceDiagram, stateDiagram-v2, erDiagram) with
 the syntax that bites. A design study may return `diagrams` (title, kind, mermaid); the
-lead places them in the plan document's Current state and Proposed model sections. In
-audit mode a stale diagram is a finding like a stale sentence. The stages, drawn the way
+lead places them under Analysis > Current state and Technical spec > Proposed model; at
+T3 only Current state is filled from the study, since the lead writes no other Analysis
+subsection there. In audit mode a stale diagram is a finding like a stale sentence. The stages, drawn the way
 the pack asks:
 
 ```mermaid

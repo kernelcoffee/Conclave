@@ -9,6 +9,26 @@ The functional spec is what is approved; the technical spec serves it. If they c
 - **Branch:** <branch name>
 - **Status:** <planning | approved | building | reviewing | finishing | ready | done | stopped>
 
+## Analysis
+
+What the plan rests on, written before any solution so the user can check it against the code.
+
+### Request
+
+<The task restated in your own words: what is asked, and what is not.>
+
+### Current state
+
+<How it works today, each claim with a file reference. When more than two parts or a flow are involved, a Mermaid diagram (flowchart or sequenceDiagram, real names, at most twelve nodes) with a one-line caption.>
+
+### Constraints
+
+- <a rule, contract or convention that bounds the solution, with where it is written>
+
+### Unknowns
+
+- <what is not known and what would settle it; "(none)" when nothing is open>
+
 ## Functional spec
 
 ### Why
@@ -36,13 +56,9 @@ The functional spec is what is approved; the technical spec serves it. If they c
 
 ## Technical spec
 
-### Current state
-
-<How it works today, with file references. When more than two parts or a flow are involved, a Mermaid diagram (flowchart or sequenceDiagram, real names, at most twelve nodes) with a one-line caption.>
-
 ### Proposed model
 
-<The recommended shape in prose: what changes, what stays, how the parts fit. A diagram on the same terms as Current state when the shape changes; the two diagrams are comparable side by side.>
+<The recommended shape in prose: what changes, what stays, how the parts fit. A diagram on the same terms as the Current state diagram under Analysis when the shape changes; the two diagrams are comparable side by side.>
 
 ### Alternatives
 
@@ -81,6 +97,7 @@ Edit these before the build stage to steer: the devs build from exactly what is 
 
 ## Steps
 
+- [ ] analysis checkpoint
 - [ ] plan (<n> agents)
 - [ ] approved by the user
 - [ ] build (<n> agents)

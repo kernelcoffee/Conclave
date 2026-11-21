@@ -102,8 +102,11 @@ node tests/workflows.test.mjs                     # workflow control flow, fake 
 5. A session can end between stages. `/conclave:continue` (or `/conclave` with no task)
    resumes at the next stage from the document and the run state in `.claude/conclave/`.
 6. When the finish stage reports `ready_to_commit`, the lead proposes commits in the
-   build-safe slices the dev declared, the plan document in the first one. Nothing is
-   committed until you approve, and the guardrails ask you for every commit.
+   build-safe slices the dev declared. The plan document is not in them: plans are working
+   documents, and the lead adds `docs/plans/` and `.claude/conclave/` to `.gitignore`
+   (its own uncommitted ignore lines come first, as a `chore` commit). Set
+   `docs.commit_plans: true`, or ask in the task, to commit the plan in the first slice.
+   Nothing is committed until you approve, and the guardrails ask you for every commit.
 
 ```mermaid
 flowchart LR
@@ -250,7 +253,7 @@ does not recognise. Test the rules offline with
 `.claude/conclave.json` describes the project: `pace` (how often a task pauses), `components` (each with `paths`, `tests`,
 `stacks`, `checks`, optional `build`, `e2e`, `coverage`, `setup`, `pitfalls`,
 `conventions`, `ui`), `contracts` between components, `stakes` (what severity `high`
-means here), `security.threat_model`, `docs` (including `docs.plans`, where plan documents go), `devops`, `gates`, `git`, `models` and
+means here), `security.threat_model`, `docs` (including `docs.plans`, where plan documents go, and `docs.commit_plans`, default `false`: plan documents stay out of commits and the lead ignores the plans directory; `true` commits them with the change), `devops`, `gates`, `git`, `models` and
 `tier_overrides`. Start from `plugins/conclave/templates/conclave.json`; the schema is
 `plugins/conclave/schemas/conclave.schema.json`. Findings are routed to the dev that owns
 the path, the docs writer, or devops by matching these entries. The same entries drive

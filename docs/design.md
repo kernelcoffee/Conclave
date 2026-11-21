@@ -74,6 +74,12 @@ See `plugins/conclave/schemas/conclave.schema.json`. Key fields the scripts rely
 `build`, `e2e`, `coverage`, `setup`, `pitfalls`, `conventions`), `contracts`, `stakes`,
 `security`, `docs`, `devops`, `gates`, `git`, `models`, `tier_overrides`.
 
+Two `docs` keys govern plan documents: `docs.plans` is the directory for working plan
+documents (default `docs/plans/`), and `docs.commit_plans` is a boolean, default `false`.
+While it is `false` the lead adds the plans directory to `.gitignore` and no commit slice
+holds the plan document; `true` puts the plan in the first slice. See "Plan documents stay
+local".
+
 ### Execution plan (`exec`, built by the lead, consumed by `workflows/dev-team.js`)
 
 ```js
@@ -274,12 +280,37 @@ itself and launches `build` with `exec.brief` and no `state`.
 
 The plan document lives at `<docs.plans>/<YYYY-MM-DD>-<slug>.md` (default
 `docs/plans/`), created by the lead from `templates/plan.md` right after triage at T1 and
-above, kept current after every stage, and committed in the first commit slice. It is
-the user's steering surface: before `build` the lead re-reads its Briefs section into
+above, and kept current after every stage. It is the working paper of one task, not a
+record: by default it is not committed (see below). It is the user's steering surface: before `build` the lead re-reads its Briefs section into
 `state.briefs`, so an edited brief wins over the architect's. Stage state for resuming
 lives in `.claude/conclave/runs/<slug>.json` (ignored by git): `task`, `slug`,
 `plan_doc`, `tier`, `exec`, `stage_done`, `state`, timestamps. `/conclave:continue`
 reads both and launches the next stage, in this session or a later one.
+
+### Plan documents stay local
+
+Plans are not committed by default. When the lead creates the run JSON it makes sure the
+project's `.gitignore` lists `.claude/conclave/` and, unless plans are committed, the plans
+directory (`docs.plans`, written with one trailing slash), adds each missing line and says
+so, then checks both paths with `git check-ignore -q`. `.gitignore` is named in
+`exec.lead_files` while its difference from `profile.base` is only those lines, so the
+scope gate still catches any other edit a dev makes there.
+
+| Situation | Behaviour |
+|---|---|
+| Default | no commit slice holds the plan document; after the last commit the lead sets Status `done` in the local file |
+| `docs.commit_plans: true` | the plan document goes into the first slice (staged with `git add -f` when the directory is ignored) and is in `exec.lead_files`; a committed plan's Status rule is unchanged |
+| The task asks to commit the plan | as `commit_plans: true` for that task only; the profile is not changed unless the user asks |
+| The plans directory already tracks other documents (a decision record, for example) | the lead asks the user: a directory of its own for `docs.plans` (recommended), ignore only plan-named files (`<plans>/[0-9]...-*.md`), or `docs.commit_plans: true`; the answer goes under Decisions |
+| Plan documents already tracked, `commit_plans` not `true` | the lead says once, in the message where it adds the ignore line, that they stay tracked, new plans will not be committed and `docs.commit_plans: true` keeps the old behaviour; it never untracks, moves or deletes them |
+
+A tracked file counts as a plan document only when it is named `<YYYY-MM-DD>-<slug>.md` and
+has the template's `- **Tier:**` line. The lead's own uncommitted files (the ignore lines,
+the plan document when committed) are proposed as a first commit slice of their own, ahead
+of the workflow's `commit_plan`; an entry with nothing uncommitted is in no slice. Because
+the plan is local, `/conclave:continue` restarting from a plan document with no run JSON
+needs that document on this machine; only a project that commits its plans can restart a run
+that began on another machine.
 
 ### Review findings: resume, merge and routing
 

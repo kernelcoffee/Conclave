@@ -23,7 +23,7 @@ plugins/conclave/
   skills/stack-<name>/SKILL.md      stack knowledge packs (not user-invocable)
   skills/writing-docs/SKILL.md      document structure and Mermaid patterns (docs-writer, lead)
   workflows/dev-team.js             the pipeline; shaped by exec from the lead
-  workflows/plan-team.js            plan only: design study (exec.mode design), pm, architect
+  workflows/plan-team.js            plan only: analysis stage, then design study (exec.mode design), pm, architect
   workflows/review-team.js          review and refute only
   bin/shortcut-audit.sh             generic gate scripts QA and the verifier run
   bin/diff-coverage.sh

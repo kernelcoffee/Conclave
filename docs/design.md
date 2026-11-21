@@ -97,9 +97,17 @@ See `plugins/conclave/schemas/conclave.schema.json`. Key fields the scripts rely
   stage: "all",                  // "analysis" | "plan" | "build" | "review" | "finish" | "all"; one stage per launch
   state: null,                   // the state object the previous stage returned, passed back verbatim
   mode: "",                      // "design": a design study runs, after the analysis, before the pm in the plan stage
+  lead_files: [],                // optional: paths or globs the lead changed itself; every scope check allows them
   // pace ("step" | "plan" | "auto") is the lead's own setting; the script never reads it
 }
 ```
+
+`exec.lead_files` is a path or a list of paths (a single string is a list of one). It is read
+on every launch and not saved in `state`, so the lead passes it again on each stage. Every
+scope check (build, review, finish) and QA's scope gate allow these paths, so a file the
+lead edited itself is never sent to a dev as an edit outside the allowed paths. Any value
+that is not a string or a list of strings stops the launch with an error before an agent
+runs. Without it, behaviour is unchanged.
 
 Workflow args: `{ profile, exec }`, or a plain string, which the script treats as
 `exec.task` with every other field at its default. When `profile` is missing the script
@@ -217,7 +225,7 @@ needs, so the lead can pause between stages and the user can read, edit and resu
 | `plan` | the analysis first when there is no plan, no `state.analysis`, no `exec.brief` and `skip` lacks `analysis`; design study (`exec.mode: "design"`), pm, architect, design duel, consult | `state.analysis`, `state.briefs` (final), spec, contracts, expected failures |
 | `build` | contract tests, build, cross-check, challenge | files changed, challenges, escalations |
 | `review` | lenses, refute, fix, probes | findings raw, confirmed, fixed, probe results |
-| `finish` | tests, docs, QA | `accepted` or `not-ready`, `commit_plan` |
+| `finish` | tests, docs with audit, QA | `accepted` or `not-ready`, `commit_plan` |
 
 `plan-team` runs two stages through `exec.stage`: `analysis` makes one architect call and
 returns `{ status: "stage-done", stage: "analysis", next_stage: "plan", task, analysis,
@@ -231,11 +239,17 @@ is `needs-human` with `phase: "Analysis"`, not a throw, and no pm call. The `sta
 returns is accepted by `dev-team` stage `plan`, which then makes no analysis call.
 `plan-team` has no `skip`.
 
+In the finish stage, a docs audit that returns nothing did not check the documentation. The
+stage goes on to QA with `docs.audited: false`, the summary carries `docs_audited: false` and
+the docs slice of `commit_plan` says `docs writer, not audited`. When the audit returns a
+list, empty or not, `docs.audited` is `true` and the rationale says `docs writer, audited`.
+`docs_audited` is `null` when no audit was due.
+
 Return contract of every launch: `status` (`stage-done`, `needs-human`, `accepted`,
 `not-ready`), `stage`, `next_stage` (`plan`, `build`, `review`, `finish` or `null`), `state`
 (opaque to the lead except `state.briefs` and `state.analysis`, which it refreshes from the plan document; passed back verbatim otherwise), `summary` (components,
 files_changed, challenges, escalations, findings_raw, findings_confirmed,
-findings_fixed, probes, tests_added, docs_files, qa_green, agents_used), `agents`, and
+findings_fixed, probes, tests_added, docs_files, docs_audited, qa_green, agents_used), `agents`, and
 for `needs-human` the `decision_request`; a stop is resumed by relaunching the same
 stage with the same `state`; when `decision_request.context` carries `decisions` or
 `needs_decision`, also with `exec.decisions` set to the user's answers and `exec.proceed:
@@ -266,6 +280,44 @@ the user's steering surface: before `build` the lead re-reads its Briefs section
 lives in `.claude/conclave/runs/<slug>.json` (ignored by git): `task`, `slug`,
 `plan_doc`, `tier`, `exec`, `stage_done`, `state`, timestamps. `/conclave:continue`
 reads both and launches the next stage, in this session or a later one.
+
+### Review findings: resume, merge and routing
+
+A `review` launch continues from the findings the previous launch left open. Each entry of
+`state.unresolved` is judged again in round 1 together with the new findings, so it reaches
+a refuter and, when confirmed, a fix. The old `refuted`, `verdict_reason`, `fixed` and
+`recheck_reason` fields are dropped first, so a stale verdict never stands in for a new one.
+
+One defect is judged once. Before the refuters run, `mergeFindings` groups the findings of
+all lenses and the carried ones, and each group becomes one finding with one refuter call,
+one item in the fix prompt and one recheck. `dev-team.js` and `review-team.js` carry the
+same block of text, and `tests/workflows.test.mjs` asserts that it is identical.
+
+| Rule | Behaviour |
+|---|---|
+| Key with a line | the repository path (below) and the line; the same file at two lines is two findings |
+| Key without a line | the file as written and the first 40 characters of the summary, as before |
+| Leading copy | the most severe copy (the first on a tie); a merged finding with a `high` copy gets `refute_votes_high` votes |
+| `lens` | every lens that reported it, joined with `, ` |
+| `also_reported` | one entry per other copy: `lens`, `severity`, `summary`, `failure_scenario`, `suggested_fix` when given, `file` when its spelling differs from the merged one |
+| `file` | a relative spelling from the group when there is one, otherwise the leading copy's own; always a path a reviewer wrote |
+
+Reviewers write a file relative or absolute, and the script cannot see the file system.
+`repoPath` reduces an absolute path to its tail from the `/` before one of the profile's
+component, tests, docs or devops paths. A directory or glob path outranks an exact-file path
+(`Dockerfile`, `README.md`), which also names files inside components; then the longest path
+wins, then the rightmost occurrence. A relative path is left as written and routed by the
+profile's paths as before; an absolute path that matches nothing is left as written too and
+routes to the first entry of `exec.components`. The reduced path only routes the fix
+(`ownerOf`) and keys the merge; the file shown to the refuter, the fix and the recheck is
+never the reduction. Without the repository root the cut is a guess: a directory above the
+repository named like a longer profile path, or an inner directory named like its component
+(`backend/backend/`) or like a longer profile path (`app/tests/` with `tests/`), can send
+the fix to the wrong owner or leave a relative copy of the same defect judged apart. The file
+the agents read is not affected.
+
+`review-team` applies the same merge, so each confirmed and each refuted finding appears once
+in its result with its lenses; it routes nothing.
 
 Pace is the lead's setting, from `--pace` on the command, else `profile.pace`, else
 `step`: `step` pauses after every stage, `plan` only after the plan, `auto` launches

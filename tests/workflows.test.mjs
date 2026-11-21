@@ -28,14 +28,15 @@ function load(file) {
 function fakeAgent(sc, calls) {
   const st = { chal: {}, probes: 0, qa: 0 }
   return async (prompt, opts = {}) => {
-    calls.push({ label: opts.label || '', type: (opts.agentType || 'plain').replace('conclave:', ''), model: opts.model || 'inherit' })
+    calls.push({ label: opts.label || '', type: (opts.agentType || 'plain').replace('conclave:', ''), model: opts.model || 'inherit', effort: opts.effort, schema: opts.schema, prompt })
     const l = opts.label || ''
     const comps = (sc.exec && sc.exec.components) || ['backend']
     if (!opts.schema) return 'guidance'
     if (l === 'profile') return { profile: template }
-    if (l === 'design-study') return { current_state: 'today', problems: ['p'], proposed_model: 'model M', alternatives: [{ name: 'A', summary: 's', pros: ['x'], cons: ['y'] }], decisions: sc.designDecides && !(sc.exec && sc.exec.proceed) ? [{ question: 'storage?', options: [{ label: 'sqlite', consequence: 'c1' }, { label: 'files', consequence: 'c2' }], recommendation: 'sqlite' }] : [], migration: 'none', risks: [] }
+    if (l === 'analysis') return sc.noAnalysis ? null : { request: 'do x', current_state: sc.analysisState || 'read today: a.js calls b.js', constraints: ['c1 (docs/x.md)'], unknowns: [], components: comps, ...(sc.analysisDiagram ? { diagrams: [{ title: 'today flow', kind: 'flowchart', mermaid: 'flowchart LR\n  A["a.js"] --> B["b.js"]' }] } : {}) }
+    if (l === 'design-study') return { problems: ['p'], proposed_model: 'model M', alternatives: [{ name: 'A', summary: 's', pros: ['x'], cons: ['y'] }], decisions: sc.designDecides && !(sc.exec && sc.exec.proceed) ? [{ question: 'storage?', options: [{ label: 'sqlite', consequence: 'c1' }, { label: 'files', consequence: 'c2' }], recommendation: 'sqlite' }] : [], migration: 'none', risks: [] }
     if (l === 'pm') return { summary: 's', goals: ['g'], acceptance: ['a'], components: comps, security_sensitive: false, needs_decision: sc.pmDecides ? [{ question: 'q', options: ['a', 'b'], recommendation: 'a' }] : [], assumptions: [] }
-    if (l === 'architect') return { summary: 'p', components: comps, briefs: comps.map((c) => ({ component: c, brief: `brief ${c}` })), contracts: comps.length > 1 ? [{ between: ['backend', 'frontend'], text: 'GET /x' }] : [], expected_failures: ['a | b | c'], specialists: [], dev_specialities: ['data', 'concurrency'], needs_decision: [], security_sensitive: false, touches_infra: false }
+    if (l === 'architect') return { summary: 'p', components: comps, briefs: comps.map((c) => ({ component: c, brief: `brief ${c}` })), contracts: comps.length > 1 ? [{ between: ['backend', 'frontend'], text: 'GET /x' }] : [], expected_failures: ['a | b | c'], specialists: [], dev_specialities: ['data', 'concurrency'], needs_decision: sc.archDecides && !(sc.exec && sc.exec.proceed) ? [{ question: 'which index?', options: ['a', 'b'], recommendation: 'a' }] : [], security_sensitive: false, touches_infra: false }
     if (l.startsWith('design:') && l !== 'design:judge') return { approach: 'a', steps: ['s'], files: ['f'], risks: [], expected_tests: [], unsure: [] }
     if (l.startsWith('critique:')) return { verdict: sc.undecidable ? 'adopt_mine' : (l.endsWith('A') ? 'adopt_mine' : 'adopt_theirs'), objections: [], plan: 'plan A' }
     if (l === 'design:judge') return { winner: sc.undecidable ? 'undecidable' : 'A', plan: 'p', reasoning: 'r', decision_needed: 'which storage?' }
@@ -72,11 +73,16 @@ async function runScenario(file, sc) {
   const phases = []
   const parallel = async (thunks) => Promise.all(thunks.map(async (f) => { try { return await f() } catch (e) { return null } }))
   const result = await load(file)(sc.rawArgs !== undefined ? sc.rawArgs : { profile: sc.profile, exec: sc.exec }, fakeAgent(sc, calls), parallel, async () => [], (t) => phases.push(t), () => {}, { total: null })
-  return { result, calls, phases: [...new Set(phases)], types: calls.map((c) => c.type) }
+  return { result, calls, phases: [...new Set(phases)], types: calls.map((c) => c.type), labels: calls.map((c) => c.label) }
 }
+const promptOf = (r, label) => (r.calls.find((c) => c.label === label) || {}).prompt || ''
+const schemaOf = (r, label) => (r.calls.find((c) => c.label === label) || {}).schema
 
 const T2 = { tier: 2, task: 'small', brief: 'Goal', components: ['backend'], rounds: 1, lenses: ['correctness', 'security', 'stack'], skip: ['pm', 'architect', 'consult', 'crosscheck', 'docs'], plugin_root: '/plug' }
 const T3 = { tier: 3, task: 'feature', components: ['backend', 'frontend'], rounds: 2, lenses: ['correctness', 'security', 'stack', 'conventions', 'ux'], refute_votes_high: 3, plugin_root: '/plug' }
+// An analysis as the lead passes it back in state after the checkpoint.
+const A = { request: 'do x', current_state: 'today: a.js calls b.js', constraints: ['c1 (docs/x.md)'], unknowns: [] }
+const PT = { task: 'x', components: ['backend'], plugin_root: '/plug' }
 
 const cases = [
   ['dev-team T2 accepted', 'dev-team', { profile: profileWith({}), exec: T2 }, (r) => {
@@ -86,14 +92,15 @@ const cases = [
   }],
   ['dev-team T3 with every option', 'dev-team', { profile: profileWith({ mutation_probes: true }), exec: { ...T3, contract: true, design: 'duel' } }, (r) => {
     eq(r.result.status, 'accepted')
-    for (const p of ['Plan', 'Design', 'Contract', 'Build', 'Cross-check', 'Challenge', 'Review', 'Verify', 'Fix', 'Probes', 'Tests', 'Docs', 'QA']) includes(r.phases, p)
+    for (const p of ['Analysis', 'Plan', 'Design', 'Contract', 'Build', 'Cross-check', 'Challenge', 'Review', 'Verify', 'Fix', 'Probes', 'Tests', 'Docs', 'QA']) includes(r.phases, p)
     eq(r.result.design.winner, 'A'); eq(r.result.probes.verdict, 'pass')
     eq(r.result.commit_plan[0].title.startsWith('test: add contract tests'), true)
     includes(r.types, 'test-auditor')
   }],
   ['dev-team no profile reads it', 'dev-team', { exec: T2 }, (r) => { eq(r.phases[0], 'Profile'); eq(r.result.status, 'accepted') }],
+  // Changed expectation (0.4.6): a T3 plan now starts with the architect's analysis.
   ['dev-team pm decisions stop', 'dev-team', { profile: profileWith({}), exec: T3, pmDecides: true }, (r) => {
-    eq(r.result.status, 'needs-human'); eq(r.result.phase, 'Plan'); eq(r.calls.length, 1)
+    eq(r.result.status, 'needs-human'); eq(r.result.phase, 'Plan'); eq(r.calls.length, 2); eq(r.labels.join(','), 'analysis,pm')
   }],
   ['dev-team frozen test modified stops', 'dev-team', { profile: profileWith({}), exec: { ...T3, components: ['backend'], contract: true }, frozenFails: true }, (r) => {
     eq(r.result.status, 'needs-human'); eq(r.result.phase, 'Build')
@@ -113,9 +120,11 @@ const cases = [
   ['dev-team red QA gets one repair round', 'dev-team', { profile: profileWith({}), exec: T2, qaRed: true, cleanReview: true }, (r) => {
     eq(r.result.status, 'accepted'); includes(r.calls.map((c) => c.label), 'qa-fix:backend'); includes(r.calls.map((c) => c.label), 'qa rerun')
   }],
+  // Changed expectation (0.4.6): the plan launch with no state runs the analysis first, no stop before the pm.
   ['staged: plan then build then review then finish, state chained', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan' } }, async (r) => {
     eq(r.result.status, 'stage-done'); eq(r.result.stage, 'plan'); eq(r.result.next_stage, 'build')
-    eq(r.types.join(','), 'pm,architect,ux'); eq(Object.keys(r.result.state.briefs).sort().join(','), 'backend,frontend')
+    eq(r.labels.join(','), 'analysis,pm,architect,consult:ux'); eq(r.result.state.analysis.current_state, 'read today: a.js calls b.js')
+    eq(Object.keys(r.result.state.briefs).sort().join(','), 'backend,frontend')
     const sc = { profile: profileWith({}), exec: { ...T3, stage: 'build', state: { ...r.result.state, briefs: { ...r.result.state.briefs, backend: 'edited by the user' } } } }
     const b = await runScenario(wf('dev-team'), sc)
     eq(b.result.status, 'stage-done'); eq(b.result.stage, 'build'); eq(b.result.next_stage, 'review')
@@ -138,10 +147,13 @@ const cases = [
   ['staged: finish refuses an unclean review', 'dev-team', { profile: profileWith({}), exec: { ...T2, stage: 'finish', state: { components: ['backend'], plan: { summary: 'x', contracts: [], expected_failures: [], specialists: [] }, briefs: { backend: 'b' }, reports: { backend: { files_changed: [] } }, reviewClean: false, unresolved: [{ file: 'x' }] } } }, (r) => {
     eq(r.result.status, 'needs-human'); eq(r.calls.length, 0)
   }],
+  // Changed expectation (0.4.6): the first launch is analysis then pm; the resume does not re-read.
   ['staged: needs-human in plan carries state and resumes', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan' }, pmDecides: true }, async (r) => {
     eq(r.result.status, 'needs-human'); eq(r.result.stage, 'plan'); eq(r.result.state.plan, null)
+    eq(r.labels.join(','), 'analysis,pm'); eq(r.result.state.analysis.request, 'do x')
     const again = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, stage: 'plan', state: r.result.state, decisions: 'use a', proceed: true }, pmDecides: true })
-    eq(again.result.status, 'stage-done'); eq(again.result.state.agents.n, 4) // pm twice, architect, ux consultant
+    eq(again.result.status, 'stage-done'); notIncludes(again.labels, 'analysis')
+    eq(again.result.state.agents.n, 5) // analysis, pm twice, architect, ux consultant
   }],
   ['review clean', 'review-team', { profile: profileWith({}), exec: { base: 'origin/main', lenses: ['correctness', 'security', 'stack'], components: ['backend'], plugin_root: '/plug' }, cleanReview: true }, (r) => {
     eq(r.result.status, 'accepted'); notIncludes(r.types, 'refuter')
@@ -149,29 +161,418 @@ const cases = [
   ['review with a confirmed finding', 'review-team', { profile: profileWith({}), exec: { base: 'origin/main', lenses: ['correctness'], components: ['backend'], plugin_root: '/plug' } }, (r) => {
     eq(r.result.status, 'not-ready'); eq(r.result.confirmed.length, 1); includes(r.types, 'refuter')
   }],
-  ['string launch: plan-team', 'plan-team', { rawArgs: 'add a thing', exec: {} }, (r) => { eq(r.result.status, 'accepted'); eq(r.phases[0], 'Profile'); eq(r.types.join(','), 'plain,pm,architect') }],
+  // Changed expectation (0.4.6): plan-team reads the current state before the pm.
+  ['string launch: plan-team', 'plan-team', { rawArgs: 'add a thing', exec: {} }, (r) => {
+    eq(r.result.status, 'accepted'); eq(r.phases[0], 'Profile'); eq(r.labels.join(','), 'profile,analysis,pm,architect')
+    eq(r.types.join(','), 'plain,architect,pm,architect'); eq(r.result.analysis.request, 'do x')
+  }],
   ['string launch: review-team', 'review-team', { rawArgs: 'look at it', exec: {}, cleanReview: true }, (r) => { eq(r.result.status, 'accepted'); eq(r.phases[0], 'Profile') }],
-  ['string launch: dev-team', 'dev-team', { rawArgs: 'build a thing', exec: {} }, (r) => { eq(r.result.status, 'accepted'); eq(r.phases[0], 'Profile'); includes(r.types, 'pm'); includes(r.types, 'dev') }],
+  ['string launch: dev-team', 'dev-team', { rawArgs: 'build a thing', exec: {} }, (r) => {
+    eq(r.result.status, 'accepted'); eq(r.phases[0], 'Profile'); includes(r.types, 'pm'); includes(r.types, 'dev')
+    eq(r.labels.slice(0, 3).join(','), 'profile,analysis,pm'); eq(r.result.analysis.request, 'do x'); eq(r.result.state.analysis.request, 'do x')
+  }],
   ['object launch unchanged: empty object throws on missing task', 'dev-team', { rawArgs: {}, exec: {} }, (r) => { throw new Error('should have thrown') }],
-  ['design mode: plan-team stops on design decisions then resumes', 'plan-team', { profile: profileWith({}), exec: { task: 'redesign x', components: ['backend'], mode: 'design', plugin_root: '/plug' }, designDecides: true }, async (r) => {
-    eq(r.result.status, 'needs-human'); eq(r.result.decision_request.question, 'Design decisions'); eq(r.types.join(','), 'architect')
+  // Changed expectation (0.4.6): launched after the analysis checkpoint (state carries the
+  // analysis), so the only call is the design study; the resume re-runs the study, not the analysis.
+  ['design mode: plan-team stops on design decisions then resumes', 'plan-team', { profile: profileWith({}), exec: { task: 'redesign x', components: ['backend'], mode: 'design', plugin_root: '/plug', state: { analysis: A } }, designDecides: true }, async (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.result.decision_request.question, 'Design decisions'); eq(r.labels.join(','), 'design-study')
     eq(r.result.decision_request.context.decisions[0].options[0].consequence, 'c1')
-    const again = await runScenario(wf('plan-team'), { profile: profileWith({}), exec: { task: 'redesign x', components: ['backend'], mode: 'design', plugin_root: '/plug', decisions: 'sqlite', proceed: true }, designDecides: true })
-    eq(again.result.status, 'accepted'); eq(again.types.join(','), 'architect,pm,architect'); eq(again.result.design_study.proposed_model, 'model M')
+    deepEq(r.result.analysis, A); deepEq(r.result.state.analysis, A); eq(r.result.design_study.proposed_model, 'model M')
+    const again = await runScenario(wf('plan-team'), { profile: profileWith({}), exec: { task: 'redesign x', components: ['backend'], mode: 'design', plugin_root: '/plug', state: r.result.state, decisions: 'sqlite', proceed: true }, designDecides: true })
+    eq(again.result.status, 'accepted'); eq(again.labels.join(','), 'design-study,pm,architect'); eq(again.result.design_study.proposed_model, 'model M')
+    deepEq(again.result.state.analysis, A)
   }],
-  ['design mode: dev-team plan stage stops, resumes from state without re-running the study', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan', mode: 'design' }, designDecides: true }, async (r) => {
-    eq(r.result.status, 'needs-human'); eq(r.types.join(','), 'architect'); eq(r.result.state.design_study.proposed_model, 'model M')
+  // Changed expectation (0.4.6): launched with state.analysis; the resume runs neither the analysis nor the study.
+  ['design mode: dev-team plan stage stops, resumes from state without re-running the study', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan', mode: 'design', state: { analysis: A } }, designDecides: true }, async (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.labels.join(','), 'design-study'); eq(r.result.state.design_study.proposed_model, 'model M')
+    eq(r.result.decision_request.question, 'Design decisions')
+    eq(Object.keys(r.result.decision_request.context).sort().join(','), 'alternatives,decisions,proposed_model')
+    deepEq(r.result.state.analysis, A)
+    const p = promptOf(r, 'design-study')
+    contains(p, A.current_state); matches(p, /Build on the analysis above/); matches(p, /under risks/)
     const again = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, stage: 'plan', mode: 'design', state: r.result.state, decisions: 'sqlite', proceed: true }, designDecides: true })
-    eq(again.result.status, 'stage-done'); eq(again.types.join(','), 'pm,architect,ux'); eq(again.result.state.design_study.proposed_model, 'model M')
+    eq(again.result.status, 'stage-done'); eq(again.labels.join(','), 'pm,architect,consult:ux'); eq(again.result.state.design_study.proposed_model, 'model M')
   }],
-  ['plan accepted', 'plan-team', { profile: profileWith({}), exec: { task: 'x', components: ['backend'], plugin_root: '/plug' } }, (r) => {
-    eq(r.result.status, 'accepted'); eq(r.types.join(','), 'pm,architect')
+  ['design mode: dev-team with no state reads, then studies, then stops', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan', mode: 'design' }, designDecides: true }, (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.labels.join(','), 'analysis,design-study'); eq(r.result.decision_request.question, 'Design decisions')
+    eq(r.result.state.analysis.request, 'do x')
   }],
-  ['plan stops on decisions', 'plan-team', { profile: profileWith({}), exec: { task: 'x', components: ['backend'], plugin_root: '/plug' }, pmDecides: true }, (r) => {
-    eq(r.result.status, 'needs-human'); eq(r.types.join(','), 'pm')
+  // Changed expectation (0.4.6): plan-team with no state reads the current state first.
+  ['plan accepted', 'plan-team', { profile: profileWith({}), exec: PT }, (r) => {
+    eq(r.result.status, 'accepted'); eq(r.labels.join(','), 'analysis,pm,architect'); eq(r.result.analysis.request, 'do x')
+    eq(r.result.stage, 'plan'); eq(r.result.next_stage, null); eq(r.result.state.analysis.request, 'do x'); eq(r.result.agents.n, 3)
+  }],
+  ['plan stops on decisions', 'plan-team', { profile: profileWith({}), exec: PT, pmDecides: true }, (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.labels.join(','), 'analysis,pm'); eq(r.result.state.analysis.request, 'do x')
+  }],
+
+  // ---- dev-team: the analysis stage ----------------------------------------------------
+  ['analysis stage: one architect call, stage-done, next plan', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'analysis' } }, (r) => {
+    eq(r.calls.length, 1); eq(r.calls[0].type, 'architect'); eq(r.calls[0].label, 'analysis'); eq(r.calls[0].model, 'inherit'); eq(r.calls[0].effort, 'high')
+    eq(r.result.status, 'stage-done'); eq(r.result.stage, 'analysis'); eq(r.result.next_stage, 'plan'); eq(r.result.ready_to_commit, false)
+    deepEq(r.result.state.analysis, { request: 'do x', current_state: 'read today: a.js calls b.js', constraints: ['c1 (docs/x.md)'], unknowns: [], components: ['backend', 'frontend'] })
+    eq(r.result.state.spec, null); eq(r.result.state.plan, null); eq(r.result.state.agents.n, 1); includes(r.phases, 'Analysis')
+    const p = r.calls[0].prompt
+    contains(p, 'Task:\nfeature'); contains(p, `Project: ${template.name}.`); contains(p, 'Do not edit files')
+    contains(p, 'ANALYSIS.'); lacks(p, 'Your previous analysis')
+  }],
+  ['analysis stage: exec.models override for architect and planners', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'analysis', models: { architect: 'x' } } }, async (r) => {
+    eq(r.calls[0].model, 'x')
+    const p = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, stage: 'analysis', models: { planners: 'y' } } })
+    eq(p.calls[0].model, 'y'); eq(p.calls[0].label, 'analysis')
+  }],
+  ['analysis stage: nothing returned stops with no analysis', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'analysis' }, noAnalysis: true }, (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.result.stage, 'analysis'); eq(r.result.phase, 'Analysis')
+    matches(r.result.decision_request.question, /no analysis/); notIncludes(r.labels, 'pm'); eq(r.result.state.analysis, null)
+  }],
+  ['analysis stage: nothing returned on a revision keeps the previous reading', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'analysis', state: { analysis: A }, decisions: 'b.js is not called' }, noAnalysis: true }, (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.result.phase, 'Analysis'); deepEq(r.result.state.analysis, A)
+  }],
+  ['analysis stage: a correction revises the previous reading', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'analysis', state: { analysis: A }, decisions: 'b.js is called through c.js' }, analysisState: 'revised: a.js calls c.js' }, (r) => {
+    eq(r.labels.join(','), 'analysis'); eq(r.result.status, 'stage-done'); eq(r.result.next_stage, 'plan')
+    const p = r.calls[0].prompt
+    contains(p, 'Your previous analysis:'); contains(p, A.current_state); contains(p, 'b.js is called through c.js')
+    eq(r.result.state.analysis.current_state, 'revised: a.js calls c.js')
+  }],
+  ['analysis stage: no correction is a fresh reading', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'analysis', state: { analysis: A } }, analysisState: 'fresh reading' }, (r) => {
+    eq(r.labels.join(','), 'analysis'); lacks(r.calls[0].prompt, 'Your previous analysis'); lacks(r.calls[0].prompt, A.current_state)
+    eq(r.result.state.analysis.current_state, 'fresh reading')
+  }],
+  ['analysis stage: other state keys come back unchanged', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'analysis', state: { design_study: { proposed_model: 'M0', migration: 'none' }, spec: { summary: 'S0' }, agents: { n: 3 } } } }, (r) => {
+    deepEq(r.result.state.design_study, { proposed_model: 'M0', migration: 'none' }); deepEq(r.result.state.spec, { summary: 'S0' }); eq(r.result.state.agents.n, 4)
+  }],
+  ['analysis stage: skip analysis does not suppress the explicit stage', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'analysis', skip: ['analysis'] } }, (r) => {
+    eq(r.labels.join(','), 'analysis'); eq(r.result.status, 'stage-done')
+  }],
+
+  // ---- dev-team: the plan stage with and without an analysis ------------------------------
+  ['plan stage with state.analysis: no re-read, prompts carry it', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan', state: { analysis: A, agents: { n: 1 } } } }, (r) => {
+    eq(r.labels.join(','), 'pm,architect,consult:ux'); eq(r.result.status, 'stage-done'); eq(r.result.next_stage, 'build')
+    deepEq(r.result.state.analysis, A)
+    contains(promptOf(r, 'pm'), A.current_state); contains(promptOf(r, 'architect'), A.current_state)
+    contains(promptOf(r, 'pm'), 'Analysis (the reading of the code this task rests on; work from it):')
+    eq(r.result.state.agents.n, 1 + r.calls.length)
+  }],
+  ['plan stage, skip analysis: pm and architect without a reading', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan', skip: ['analysis'] } }, (r) => {
+    notIncludes(r.labels, 'analysis'); eq(r.labels.slice(0, 2).join(','), 'pm,architect'); eq(r.result.state.analysis, null)
+    lacks(promptOf(r, 'pm'), 'Analysis (the reading')
+  }],
+  ['plan stage, skip architect: the analysis still runs before the pm', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan', skip: ['architect'] } }, (r) => {
+    eq(r.labels.slice(0, 2).join(','), 'analysis,pm'); eq(r.result.status, 'stage-done')
+  }],
+  ['plan stage, 0.4.5 state with design_study and spec but no analysis: analysis first', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan', mode: 'design', state: { design_study: { problems: [], proposed_model: 'M0', alternatives: [], decisions: [], migration: 'none', risks: [] }, spec: { summary: 'S0' } } } }, (r) => {
+    eq(r.labels.join(','), 'analysis,pm,architect,consult:ux'); eq(r.result.status, 'stage-done')
+  }],
+  ['plan stage, implicit analysis returns nothing: stop before the pm', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan' }, noAnalysis: true }, (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.result.phase, 'Analysis'); eq(r.result.stage, 'plan'); notIncludes(r.labels, 'pm')
+    matches(r.result.decision_request.question, /no analysis/)
+  }],
+  ['plan stage, restored design_study with current_state: field ignored, study not re-run', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan', mode: 'design', state: { analysis: A, design_study: { current_state: 'old reading', problems: [], proposed_model: 'M0', alternatives: [], decisions: [], migration: 'none', risks: [] } } } }, (r) => {
+    eq(r.result.status, 'stage-done'); eq(r.labels.join(','), 'pm,architect,consult:ux'); eq(r.result.state.design_study.proposed_model, 'M0')
+    // The old unconfirmed reading must not reach the planning architect next to the analysis.
+    const arch = promptOf(r, 'architect')
+    contains(arch, 'Design study:'); contains(arch, 'M0'); lacks(arch, 'old reading'); lacks(arch, '"current_state"')
+  }],
+  ['analysis stage with a lead brief: no plan, no briefs in the state', 'dev-team', { profile: profileWith({}), exec: { ...T2, stage: 'analysis' } }, (r) => {
+    eq(r.labels.join(','), 'analysis'); eq(r.result.status, 'stage-done'); eq(r.result.next_stage, 'plan')
+    eq(r.result.state.plan, null); deepEq(r.result.state.briefs, {})
+  }],
+  ['analysis diagrams and components reach the design study, pm and architect', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan', mode: 'design', proceed: true }, analysisDiagram: true }, (r) => {
+    eq(r.labels.slice(0, 3).join(','), 'analysis,design-study,pm')
+    for (const label of ['design-study', 'pm', 'architect']) {
+      const p = promptOf(r, label)
+      contains(p, 'Diagrams:\ntoday flow (flowchart):\n```mermaid\nflowchart LR\n  A["a.js"] --> B["b.js"]\n```')
+      contains(p, 'Components:\n- backend\n- frontend')
+    }
+  }],
+  ['analysis revision shows the previous diagrams and components', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'analysis', state: { analysis: { ...A, components: ['backend'], diagrams: [{ title: 'old flow', mermaid: 'sequenceDiagram\n  a->>b: call' }] } }, decisions: 'b.js is called through c.js' } }, (r) => {
+    const p = r.calls[0].prompt
+    contains(p, 'Your previous analysis:'); contains(p, 'old flow:\n```mermaid\nsequenceDiagram\n  a->>b: call\n```'); contains(p, 'Components:\n- backend')
+  }],
+  ['analysis diagrams rewritten by the lead: odd shapes do not throw', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan', state: { analysis: { ...A, components: 'backend', diagrams: ['flowchart LR\n  X --> Y', { title: 't' }] } } } }, async (r) => {
+    eq(r.result.status, 'stage-done'); const pm = promptOf(r, 'pm')
+    contains(pm, 'Components:\nbackend'); contains(pm, 'Diagrams:\nflowchart LR\n  X --> Y\n\nt:\n```mermaid\n(none)\n```')
+    const s = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, stage: 'plan', state: { analysis: { ...A, diagrams: 'flowchart TD\n  P --> Q' } } } })
+    eq(s.result.status, 'stage-done'); contains(promptOf(s, 'pm'), 'Diagrams:\nflowchart TD\n  P --> Q')
+    lacks(promptOf(s, 'pm'), 'Components:')
+  }],
+  ['plan stage, analysis rewritten by the lead: lists as strings, Mermaid, plain string, empty object', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan', state: { analysis: { request: 'do x', current_state: 'flow:\n```mermaid\nflowchart LR\n  A["a.js"] --> B["b.js (x: y)"]\n```', constraints: 'c1; c2', unknowns: 'none open' } } } }, async (r) => {
+    eq(r.result.status, 'stage-done'); notIncludes(r.labels, 'analysis')
+    const pm = promptOf(r, 'pm')
+    contains(pm, '```mermaid\nflowchart LR\n  A["a.js"] --> B["b.js (x: y)"]\n```'); contains(pm, 'c1; c2'); contains(pm, 'none open')
+    const s = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, stage: 'plan', state: { analysis: 'the whole reading as one string' } } })
+    eq(s.result.status, 'stage-done'); notIncludes(s.labels, 'analysis'); contains(promptOf(s, 'pm'), 'the whole reading as one string')
+    const e = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, stage: 'plan', state: { analysis: {} } } })
+    eq(e.result.status, 'stage-done'); notIncludes(e.labels, 'analysis')
+  }],
+  ['plan stage, pm decisions with an analysis: stop keeps it, resume does not re-read', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan', state: { analysis: A } }, pmDecides: true }, async (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.result.stage, 'plan'); deepEq(r.result.state.analysis, A); eq(r.result.state.plan, null)
+    const again = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, stage: 'plan', state: r.result.state, decisions: 'use a', proceed: true }, pmDecides: true })
+    eq(again.result.status, 'stage-done'); notIncludes(again.labels, 'analysis')
+  }],
+  ['plan stage after the analysis stage still stops on design, pm and architect decisions', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'analysis' } }, async (r) => {
+    const state = r.result.state
+    const d = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, stage: 'plan', mode: 'design', state }, designDecides: true })
+    eq(d.result.status, 'needs-human'); eq(d.result.decision_request.question, 'Design decisions'); eq(d.labels.join(','), 'design-study')
+    const p = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, stage: 'plan', state }, pmDecides: true })
+    eq(p.result.status, 'needs-human'); eq(p.labels.join(','), 'pm')
+    const a = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, stage: 'plan', state }, archDecides: true })
+    eq(a.result.status, 'needs-human'); eq(a.labels.join(','), 'pm,architect'); matches(a.result.decision_request.question, /from the architect/)
+    deepEq(a.result.state.analysis, state.analysis)
+  }],
+  ['stage all, T3, no state: analysis before the pm, accepted', 'dev-team', { profile: profileWith({}), exec: T3 }, (r) => {
+    eq(r.result.status, 'accepted'); eq(r.labels.slice(0, 2).join(','), 'analysis,pm')
+    eq(r.result.analysis.request, 'do x'); eq(r.result.state.analysis.request, 'do x')
+  }],
+  ['T2 lead brief, stage all and stage build: no analysis, no pm', 'dev-team', { profile: profileWith({}), exec: T2 }, async (r) => {
+    eq(r.result.status, 'accepted'); notIncludes(r.labels, 'analysis'); notIncludes(r.labels, 'pm'); eq(r.result.analysis, null)
+    const b = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T2, stage: 'build' } })
+    eq(b.result.status, 'stage-done'); notIncludes(b.labels, 'analysis'); notIncludes(b.labels, 'pm')
+  }],
+  ['stage all with a plan in state: no analysis', 'dev-team', { profile: profileWith({}), exec: { ...T3, components: ['backend'], state: { components: ['backend'], plan: { summary: 'x', components: ['backend'], contracts: [], expected_failures: [], specialists: [] }, briefs: { backend: 'b' } } }, cleanReview: true }, (r) => {
+    notIncludes(r.labels, 'analysis'); notIncludes(r.labels, 'pm'); eq(r.result.status, 'accepted')
+  }],
+  ['build, review and finish carry the analysis unchanged', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan', state: { analysis: A } } }, async (r) => {
+    const b = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, stage: 'build', state: r.result.state } })
+    notIncludes(b.labels, 'analysis'); deepEq(b.result.state.analysis, A)
+    const v = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, stage: 'review', state: b.result.state } })
+    notIncludes(v.labels, 'analysis'); deepEq(v.result.state.analysis, A)
+    const f = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, stage: 'finish', state: v.result.state } })
+    notIncludes(f.labels, 'analysis'); deepEq(f.result.state.analysis, A); deepEq(f.result.analysis, A)
+  }],
+  ['build at T3 with no plan in state: no analysis spent', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'build' } }, (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.calls.length, 0)
+  }],
+
+  // ---- shape: the analysis and design-study schemas of both scripts -----------------------
+  ['shape: ANALYSIS and DESIGN_STUDY schemas in both scripts', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan', mode: 'design' } }, async (r) => {
+    const p = await runScenario(wf('plan-team'), { profile: profileWith({}), exec: { ...PT, mode: 'design' } })
+    for (const run of [r, p]) {
+      const a = schemaOf(run, 'analysis')
+      eq([...a.required].join(','), 'request,current_state,constraints,unknowns')
+      eq(Object.keys(a.properties).sort().join(','), 'components,constraints,current_state,diagrams,request,unknowns')
+      eq([...a.properties.diagrams.items.required].join(','), 'title,mermaid')
+      const d = schemaOf(run, 'design-study')
+      notIncludes(Object.keys(d.properties), 'current_state'); notIncludes(d.required, 'current_state')
+      eq([...d.required].sort().join(','), 'alternatives,decisions,migration,problems,proposed_model,risks')
+    }
+    deepEq(schemaOf(r, 'analysis'), schemaOf(p, 'analysis')); deepEq(schemaOf(r, 'design-study'), schemaOf(p, 'design-study'))
+  }],
+
+  // ---- plan-team: stage, state and the analysis ------------------------------------------
+  ['plan-team stage analysis: one call, stage-done', 'plan-team', { profile: profileWith({}), exec: { ...PT, stage: 'analysis' } }, (r) => {
+    eq(r.labels.join(','), 'analysis'); eq(r.calls[0].type, 'architect'); eq(r.calls[0].effort, 'high')
+    eq(r.result.status, 'stage-done'); eq(r.result.stage, 'analysis'); eq(r.result.next_stage, 'plan')
+    eq(r.result.spec, null); eq(r.result.plan, null); eq(r.result.design_study, null); eq(r.result.stopped_for_decisions, false)
+    eq(r.result.agents.n, 1); deepEq(r.result.state.analysis, r.result.analysis); eq(r.result.analysis.request, 'do x')
+    deepEq(Object.keys(r.result.state).sort(), ['agents', 'analysis'])
+    contains(r.calls[0].prompt, 'Do not edit files'); contains(r.calls[0].prompt, 'ANALYSIS.')
+  }],
+  ['plan-team stage analysis: a correction revises the reading', 'plan-team', { profile: profileWith({}), exec: { ...PT, stage: 'analysis', state: { analysis: A, agents: { n: 1 } }, decisions: 'b.js is called through c.js' }, analysisState: 'revised' }, (r) => {
+    eq(r.result.status, 'stage-done'); eq(r.labels.join(','), 'analysis')
+    const p = r.calls[0].prompt
+    contains(p, 'Your previous analysis:'); contains(p, A.current_state); contains(p, 'b.js is called through c.js')
+    eq(r.result.analysis.current_state, 'revised'); eq(r.result.agents.n, 2)
+  }],
+  ['plan-team stage analysis: nothing returned stops, no throw, no pm', 'plan-team', { profile: profileWith({}), exec: { ...PT, stage: 'analysis' }, noAnalysis: true }, (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.result.phase, 'Analysis'); matches(r.result.decision_request.question, /no analysis/)
+    eq(r.result.stopped_for_decisions, false); notIncludes(r.labels, 'pm'); eq(r.result.state.analysis, null)
+  }],
+  ['plan-team plan launch, implicit analysis returns nothing: stop before the pm', 'plan-team', { profile: profileWith({}), exec: PT, noAnalysis: true }, (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.result.phase, 'Analysis'); notIncludes(r.labels, 'pm')
+  }],
+  ['plan-team plan launch with exec.state.analysis: pm, architect, prompts carry it', 'plan-team', { profile: profileWith({}), exec: { ...PT, stage: 'plan', state: { analysis: A, agents: { n: 1 } } } }, async (r) => {
+    eq(r.labels.join(','), 'pm,architect'); eq(r.result.status, 'accepted'); deepEq(r.result.analysis, A); deepEq(r.result.state.analysis, A)
+    contains(promptOf(r, 'pm'), A.current_state); contains(promptOf(r, 'architect'), A.current_state)
+    eq(r.result.agents.n, 3); eq(r.result.agents.this_stage, 2); eq(r.result.state.agents.n, 3)
+    const absent = await runScenario(wf('plan-team'), { profile: profileWith({}), exec: { ...PT, state: { analysis: A } } })
+    eq(absent.labels.join(','), 'pm,architect'); eq(absent.result.status, 'accepted')
+  }],
+  ['plan-team plan launch, analysis rewritten by the lead: raw strings reach the prompts', 'plan-team', { profile: profileWith({}), exec: { ...PT, state: { analysis: 'the whole reading as one string' } } }, async (r) => {
+    eq(r.result.status, 'accepted'); eq(r.labels.join(','), 'pm,architect'); contains(promptOf(r, 'pm'), 'the whole reading as one string'); lacks(promptOf(r, 'pm'), '"the whole reading')
+    const l = await runScenario(wf('plan-team'), { profile: profileWith({}), exec: { ...PT, state: { analysis: { request: 'do x', current_state: 'flow:\n```mermaid\nflowchart LR\n  A --> B\n```', constraints: 'c1; c2', unknowns: 'none open' } } } })
+    eq(l.result.status, 'accepted'); contains(promptOf(l, 'architect'), '```mermaid\nflowchart LR\n  A --> B\n```'); contains(promptOf(l, 'pm'), 'c1; c2')
+  }],
+  ['plan-team: analysis diagrams and components reach the pm and the architect', 'plan-team', { profile: profileWith({}), exec: { ...PT, components: ['backend'] }, analysisDiagram: true }, (r) => {
+    eq(r.labels.join(','), 'analysis,pm,architect')
+    for (const label of ['pm', 'architect']) {
+      const p = promptOf(r, label)
+      contains(p, 'Diagrams:\ntoday flow (flowchart):\n```mermaid\nflowchart LR\n  A["a.js"] --> B["b.js"]\n```'); contains(p, 'Components:\n- backend')
+    }
+  }],
+  ['plan-team: every needs-human carries state.analysis', 'plan-team', { profile: profileWith({}), exec: { ...PT, state: { analysis: A } }, pmDecides: true }, async (r) => {
+    eq(r.result.status, 'needs-human'); deepEq(r.result.state.analysis, A); deepEq(r.result.analysis, A); eq(r.result.stage, 'plan'); eq(r.result.next_stage, null)
+    const a = await runScenario(wf('plan-team'), { profile: profileWith({}), exec: { ...PT, state: { analysis: A } }, archDecides: true })
+    eq(a.result.status, 'needs-human'); deepEq(a.result.state.analysis, A); eq(a.labels.join(','), 'pm,architect')
+  }],
+  ['plan-team stage analysis state feeds dev-team stage plan without a re-read', 'plan-team', { profile: profileWith({}), exec: { task: 'feature', components: ['backend', 'frontend'], plugin_root: '/plug', stage: 'analysis' } }, async (r) => {
+    const d = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, stage: 'plan', state: r.result.state } })
+    eq(d.result.status, 'stage-done'); notIncludes(d.labels, 'analysis'); deepEq(d.result.state.analysis, r.result.analysis)
+    eq(d.result.state.agents.n, 1 + d.calls.length)
+  }],
+
+  // ---- challenger (workflows, round 1) ----------------------------------------------------
+  // The lead re-triages with analysis.components between the analysis stage and the plan
+  // stage, then launches plan with the saved state and the re-triaged exec.components. The
+  // plan stage must work on the re-triaged components, not on the guess frozen into the
+  // analysis stage's state.
+  ['challenger: re-triaged exec.components after the analysis stage reach the plan stage', 'dev-team', { profile: profileWith({}), exec: { ...T3, components: ['backend'], stage: 'analysis' } }, async (r) => {
+    eq(r.result.status, 'stage-done')
+    const p = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, components: ['backend', 'frontend'], stage: 'plan', state: r.result.state } })
+    contains(promptOf(p, 'pm'), '"name": "frontend"')
+    const s = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, components: ['backend', 'frontend'], stage: 'plan', skip: ['pm', 'architect'], state: r.result.state } })
+    eq(Object.keys(s.result.state.briefs).sort().join(','), 'backend,frontend')
+  }],
+  // Contract 6: plan-team restores only analysis and agents; a dev-team-shaped state with a
+  // study, a spec and a plan must not short-circuit the study, the pm or the architect.
+  ['challenger: plan-team ignores design_study, spec and plan in exec.state', 'plan-team', { profile: profileWith({}), exec: { ...PT, mode: 'design', state: { analysis: A, design_study: { problems: [], proposed_model: 'STALE', alternatives: [], decisions: [], migration: 'none', risks: [] }, spec: { summary: 'STALE' }, plan: { summary: 'STALE' }, agents: { n: 2 } } } }, (r) => {
+    eq(r.result.status, 'accepted'); eq(r.labels.join(','), 'design-study,pm,architect')
+    eq(r.result.design_study.proposed_model, 'model M'); eq(r.result.spec.summary, 's')
+    deepEq(Object.keys(r.result.state).sort(), ['agents', 'analysis']); eq(r.result.agents.n, 5)
+    lacks(promptOf(r, 'pm'), 'STALE')
+  }],
+  // With skip: ["analysis"] in design mode nobody reads the current state any more: the old
+  // study asked for "how it works today (with file references)", the reduced one only asks
+  // for a proposal. Without an analysis the study must still be told to read the code first.
+  ['challenger: design study without an analysis is still told to read the code', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan', mode: 'design', skip: ['analysis'] }, designDecides: true }, (r) => {
+    eq(r.labels.join(','), 'design-study')
+    matches(promptOf(r, 'design-study'), /read the code|file reference/i)
+  }],
+  // Response to the challenger: the components precedence and the study clause, each way.
+  ['analysis launched without components: an empty state.components does not hide the re-triage', 'dev-team', { profile: profileWith({}), exec: { ...T3, components: undefined, stage: 'analysis' } }, async (r) => {
+    eq(r.result.status, 'stage-done'); deepEq(r.result.state.components, [])
+    const s = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, components: ['frontend'], stage: 'plan', skip: ['pm', 'architect'], state: r.result.state } })
+    eq(s.result.status, 'stage-done'); deepEq(s.result.state.components, ['frontend']); eq(Object.keys(s.result.state.briefs).join(','), 'frontend')
+  }],
+  ['plan launch without exec.components keeps the components of the state', 'dev-team', { profile: profileWith({}), exec: { ...T3, components: ['backend'], stage: 'analysis' } }, async (r) => {
+    const s = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, components: undefined, stage: 'plan', skip: ['pm', 'architect'], state: r.result.state } })
+    eq(s.result.status, 'stage-done'); deepEq(s.result.state.components, ['backend'])
+  }],
+  ['once a plan exists its components win over exec.components', 'dev-team', { profile: profileWith({}), exec: { ...T3, components: ['backend'], stage: 'plan' } }, async (r) => {
+    eq(r.result.status, 'stage-done'); deepEq(r.result.state.components, ['backend'])
+    const b = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, components: ['backend', 'frontend'], stage: 'build', state: r.result.state } })
+    deepEq(b.result.components, ['backend']); includes(b.labels, 'build:backend'); notIncludes(b.labels, 'build:frontend')
+  }],
+  ['design study with an analysis is told to build on it, not to re-read the code', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan', mode: 'design', state: { analysis: A } }, designDecides: true }, (r) => {
+    const p = promptOf(r, 'design-study')
+    contains(p, 'Build on the analysis above'); lacks(p, 'No analysis precedes this study')
+  }],
+  ['design study clauses are the same text in both scripts', 'plan-team', { profile: profileWith({}), exec: { ...PT, mode: 'design' }, designDecides: true }, async (r) => {
+    const lineOf = (script) => fs.readFileSync(path.join(root, 'plugins/conclave/workflows', `${script}.js`), 'utf8').split('\n').find((l) => l.includes('Build on the analysis above'))
+    eq(lineOf('plan-team'), lineOf('dev-team')); contains(lineOf('dev-team'), 'No analysis precedes this study: read the code this change touches first')
+    contains(promptOf(r, 'design-study'), 'Build on the analysis above')
+  }],
+
+  // ---- test engineer (round 2): return keys, boundaries and plan-team parity -----------------
+  ['te: dev-team analysis stage returns the contract keys, counts one agent', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'analysis' } }, (r) => {
+    for (const k of ['status', 'stage', 'next_stage', 'state', 'summary', 'agents', 'ready_to_commit']) includes(Object.keys(r.result), k)
+    eq(r.result.agents.n, 1); eq(r.result.agents.this_stage, 1); eq(r.result.summary.agents_used, 1)
+    eq(r.result.state.design_study, null); eq(r.result.state.design, null)
+  }],
+  ['te: dev-team analysis stage failure keeps the restored state and stays at analysis', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'analysis', state: { analysis: A, spec: { summary: 'S0' }, agents: { n: 3 } }, decisions: 'b.js is not called' }, noAnalysis: true }, (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.result.stage, 'analysis'); eq(r.result.next_stage, 'plan'); eq(r.result.ready_to_commit, false)
+    matches(r.result.decision_request.question, /no analysis/); eq(r.labels.join(','), 'analysis')
+    deepEq(r.result.state.analysis, A); deepEq(r.result.state.spec, { summary: 'S0' })
+  }],
+  ['te: dev-team analysis stage in design mode runs no design study', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'analysis', mode: 'design', design: 'duel', contract: true }, designDecides: true }, (r) => {
+    eq(r.labels.join(','), 'analysis'); eq(r.result.status, 'stage-done'); eq(r.result.next_stage, 'plan')
+    eq(r.result.state.design_study, null); eq(r.result.state.plan, null)
+  }],
+  ['te: dev-team analysis stage keeps a restored plan, briefs and components', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'analysis', state: { components: ['backend'], plan: { summary: 'P0', components: ['backend'], contracts: [], expected_failures: [], specialists: [] }, briefs: { backend: 'B0' } } } }, (r) => {
+    eq(r.labels.join(','), 'analysis'); eq(r.result.status, 'stage-done')
+    eq(r.result.state.plan.summary, 'P0'); deepEq(r.result.state.briefs, { backend: 'B0' }); deepEq(r.result.state.components, ['backend'])
+    eq(r.result.state.analysis.request, 'do x')
+  }],
+  ['te: dev-team analysis stage with a correction but no previous reading is a fresh reading', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'analysis', decisions: 'b.js is not called' } }, (r) => {
+    eq(r.labels.join(','), 'analysis'); eq(r.result.status, 'stage-done'); lacks(r.calls[0].prompt, 'Your previous analysis')
+    eq(r.result.state.analysis.request, 'do x')
+  }],
+  ['te: dev-team analysis revision prompt keeps the context block and the instruction', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'analysis', state: { analysis: A }, decisions: 'b.js is called through c.js' } }, (r) => {
+    const p = r.calls[0].prompt
+    contains(p, `Project: ${template.name}.`); contains(p, 'Task:\nfeature'); contains(p, 'ANALYSIS.'); contains(p, 'Do not edit files')
+    // The previous reading and the correction come before the instruction that asks for the whole reading again.
+    eq(p.indexOf('Your previous analysis:') < p.indexOf('ANALYSIS.'), true); eq(p.indexOf('b.js is called through c.js') < p.indexOf('ANALYSIS.'), true)
+  }],
+  ['te: dev-team exec.proceed is not read by the analysis: explicit stage and implicit run both still read', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'analysis', proceed: true } }, async (r) => {
+    eq(r.labels.join(','), 'analysis'); eq(r.result.status, 'stage-done'); eq(r.result.next_stage, 'plan')
+    const p = await runScenario(wf('dev-team'), { profile: profileWith({}), exec: { ...T3, stage: 'plan', proceed: true } })
+    eq(p.labels.slice(0, 2).join(','), 'analysis,pm'); eq(p.result.status, 'stage-done')
+  }],
+  ['te: dev-team unknown stage value runs all stages with the analysis first', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'Analysis' } }, (r) => {
+    eq(r.result.status, 'accepted'); eq(r.labels.slice(0, 2).join(','), 'analysis,pm'); eq(r.result.analysis.request, 'do x')
+  }],
+  ['te: dev-team implicit analysis failure in an all-stages launch stops before the pm', 'dev-team', { profile: profileWith({}), exec: T3, noAnalysis: true }, (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.result.phase, 'Analysis'); eq(r.result.stage, 'all'); eq(r.labels.join(','), 'analysis')
+    eq(r.result.state.analysis, null); eq(r.result.state.plan, null)
+  }],
+  ['te: dev-team T2 lead brief, stage plan: no analysis, no pm', 'dev-team', { profile: profileWith({}), exec: { ...T2, stage: 'plan' } }, (r) => {
+    eq(r.result.status, 'stage-done'); eq(r.result.next_stage, 'build'); notIncludes(r.labels, 'analysis'); notIncludes(r.labels, 'pm')
+    eq(r.result.state.analysis, null); eq(r.result.state.briefs.backend, 'Goal')
+  }],
+  ['te: dev-team design mode, no analysis in state but proceed: the study gets the fresh reading', 'dev-team', { profile: profileWith({}), exec: { ...T3, stage: 'plan', mode: 'design', proceed: true }, designDecides: true }, (r) => {
+    eq(r.labels.slice(0, 3).join(','), 'analysis,design-study,pm'); eq(r.result.status, 'stage-done')
+    const p = promptOf(r, 'design-study')
+    contains(p, 'DESIGN STUDY.'); contains(p, 'read today: a.js calls b.js'); contains(p, 'Build on the analysis above')
+    eq(p.indexOf('read today: a.js calls b.js') < p.indexOf('DESIGN STUDY.'), true)
+  }],
+
+  ['te: plan-team stage analysis returns exactly the contract keys', 'plan-team', { profile: profileWith({}), exec: { ...PT, stage: 'analysis' } }, (r) => {
+    deepEq(Object.keys(r.result).sort(), ['agents', 'analysis', 'design_study', 'next_stage', 'plan', 'spec', 'stage', 'state', 'status', 'stopped_for_decisions', 'task'])
+    eq(r.result.task, 'x'); eq(r.result.agents.this_stage, 1); eq(typeof r.result.agents.byModel, 'object'); deepEq(r.result.state.agents, r.result.agents)
+  }],
+  ['te: plan-team analysis prompt carries the context block and the component choice', 'plan-team', { profile: profileWith({}), exec: { ...PT, stage: 'analysis' } }, (r) => {
+    const p = r.calls[0].prompt
+    contains(p, `Project: ${template.name}.`); contains(p, 'x'); contains(p, 'ANALYSIS.'); contains(p, 'Do not edit files')
+    for (const c of template.components) contains(p, c.name)
+    lacks(p, 'Your previous analysis')
+  }],
+  ['te: plan-team stage analysis without a correction is a fresh reading that replaces the state', 'plan-team', { profile: profileWith({}), exec: { ...PT, stage: 'analysis', state: { analysis: A, agents: { n: 2 } } }, analysisState: 'fresh' }, (r) => {
+    eq(r.labels.join(','), 'analysis'); lacks(r.calls[0].prompt, 'Your previous analysis'); lacks(r.calls[0].prompt, A.current_state)
+    eq(r.result.analysis.current_state, 'fresh'); eq(r.result.state.analysis.current_state, 'fresh'); eq(r.result.agents.n, 3)
+  }],
+  ['te: plan-team stage analysis in design mode runs no study', 'plan-team', { profile: profileWith({}), exec: { ...PT, stage: 'analysis', mode: 'design' }, designDecides: true }, (r) => {
+    eq(r.labels.join(','), 'analysis'); eq(r.result.status, 'stage-done'); eq(r.result.design_study, null)
+  }],
+  ['te: plan-team analysis call takes the planners policy and exec.models overrides', 'plan-team', { profile: profileWith({}), exec: { ...PT, stage: 'analysis' } }, async (r) => {
+    eq(r.calls[0].model, 'inherit'); eq(r.calls[0].effort, 'high')
+    const a = await runScenario(wf('plan-team'), { profile: profileWith({}), exec: { ...PT, stage: 'analysis', models: { architect: 'x' } } })
+    eq(a.calls[0].label, 'analysis'); eq(a.calls[0].model, 'x')
+    const p = await runScenario(wf('plan-team'), { profile: profileWith({}), exec: { ...PT, stage: 'analysis', models: { planners: 'y' } } })
+    eq(p.calls[0].model, 'y')
+  }],
+  ['te: plan-team explicit stage plan, or any other stage value, analyses first and returns stage plan', 'plan-team', { profile: profileWith({}), exec: { ...PT, stage: 'plan' } }, async (r) => {
+    eq(r.labels.join(','), 'analysis,pm,architect'); eq(r.result.status, 'accepted'); eq(r.result.stage, 'plan'); eq(r.result.next_stage, null)
+    const o = await runScenario(wf('plan-team'), { profile: profileWith({}), exec: { ...PT, stage: 'build' } })
+    eq(o.labels.join(','), 'analysis,pm,architect'); eq(o.result.status, 'accepted'); eq(o.result.stage, 'plan')
+  }],
+  ['te: plan-team exec.state that is not an object is ignored and the analysis runs', 'plan-team', { profile: profileWith({}), exec: { ...PT, state: 'garbage' } }, (r) => {
+    eq(r.labels.join(','), 'analysis,pm,architect'); eq(r.result.status, 'accepted'); eq(r.result.agents.n, 3)
+  }],
+  ['te: plan-team design mode with no state reads, then studies on the reading, then stops', 'plan-team', { profile: profileWith({}), exec: { ...PT, mode: 'design' }, designDecides: true }, (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.labels.join(','), 'analysis,design-study'); eq(r.result.decision_request.question, 'Design decisions')
+    eq(r.result.state.analysis.request, 'do x'); eq(r.result.analysis.request, 'do x'); eq(r.result.stage, 'plan'); eq(r.result.next_stage, null)
+    eq(Object.keys(r.result.decision_request.context).sort().join(','), 'alternatives,decisions,proposed_model')
+    const p = promptOf(r, 'design-study')
+    contains(p, 'DESIGN STUDY.'); contains(p, 'read today: a.js calls b.js'); contains(p, 'Build on the analysis above'); matches(p, /under risks/)
+    eq(r.result.state.agents.n, 2)
+  }],
+  ['te: plan-team needs-human returns count agents across launches', 'plan-team', { profile: profileWith({}), exec: { ...PT, state: { analysis: A, agents: { n: 4 } } }, pmDecides: true }, async (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.result.agents.n, 5); eq(r.result.agents.this_stage, 1); eq(r.result.state.agents.n, 5)
+    const again = await runScenario(wf('plan-team'), { profile: profileWith({}), exec: { ...PT, state: r.result.state, decisions: 'use a', proceed: true }, pmDecides: true })
+    eq(again.result.status, 'accepted'); eq(again.labels.join(','), 'pm,architect'); eq(again.result.agents.n, 7); deepEq(again.result.analysis, A)
+  }],
+  ['te: plan-team string launch whose analysis returns nothing stops, no throw', 'plan-team', { rawArgs: 'add a thing', exec: {}, noAnalysis: true }, (r) => {
+    eq(r.result.status, 'needs-human'); eq(r.result.phase, 'Analysis'); eq(r.labels.join(','), 'profile,analysis')
+    eq(r.result.stopped_for_decisions, false); eq(r.result.spec, null); eq(r.result.plan, null)
   }],
 ]
 
+function contains(text, needle) { if (!String(text).includes(needle)) throw new Error(`expected the text to contain ${JSON.stringify(needle)}`) }
+function lacks(text, needle) { if (String(text).includes(needle)) throw new Error(`expected the text not to contain ${JSON.stringify(needle)}`) }
+function matches(text, re) { if (!re.test(String(text))) throw new Error(`expected ${JSON.stringify(text)} to match ${re}`) }
+// Deep equality with object keys compared in sorted order.
+const canon = (v) => Array.isArray(v) ? v.map(canon) : (v && typeof v === 'object') ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canon(v[k])])) : v
+function deepEq(a, b) { const x = JSON.stringify(canon(a)); const y = JSON.stringify(canon(b)); if (x !== y) throw new Error(`expected ${y}, got ${x}`) }
 function eq(a, b) { if (a !== b) throw new Error(`expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`) }
 function includes(list, x) { if (!list.includes(x)) throw new Error(`expected ${JSON.stringify(list)} to include ${JSON.stringify(x)}`) }
 function notIncludes(list, x) { if (list.includes(x)) throw new Error(`expected ${JSON.stringify(list)} not to include ${JSON.stringify(x)}`) }

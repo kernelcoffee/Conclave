@@ -29,6 +29,7 @@ plugins/conclave/
   bin/diff-coverage.sh
   bin/scope-check.sh                changed files must stay under allowed prefixes
   bin/freeze.sh                     sha256 freeze and verify of the contract tests
+  bin/docs-link-check.py            broken links in, and to, the files the docs-writer modified
   hooks/hooks.json, hooks/guard.py  guardrails the harness enforces (secrets, git, scope); test_guard.py
   templates/conclave.json           profile template
   schemas/conclave.schema.json      profile schema
@@ -43,6 +44,7 @@ $CLAUDE plugin validate plugins/conclave        # manifest and layout
 $CLAUDE plugin validate .                       # marketplace
 $CLAUDE --plugin-dir plugins/conclave           # try the plugin in a session; /reload-plugins after edits
 bash -n plugins/conclave/bin/*.sh && shellcheck plugins/conclave/bin/*.sh
+python3 -I tests/test_docs_links.py                  # link check script, on throwaway repositories
 python3 -I plugins/conclave/hooks/test_guard.py      # guardrail rules, offline
 python3 -I tests/check_repo.py --base origin/main   # JSON, schema, packs, version bump
 node tests/workflows.test.mjs                       # workflow control flow

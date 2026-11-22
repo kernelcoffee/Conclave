@@ -173,7 +173,7 @@ Off by default; each one is a flag on `/conclave` or a profile setting.
 | `refuter` | Tries to refute each finding; only what survives reaches the devs | opus |
 | `test-engineer` | Black-box tests from the failure matrix, written before reading the implementation | opus |
 | `qa` | Checks, build, e2e, coverage gate, shortcut audit, flake runs | sonnet |
-| `docs-writer` | Keeps the docs the profile names in step with the change; files them by kind when `docs.diataxis` is `true` | sonnet |
+| `docs-writer` | Keeps the docs the profile names in step with the change; files them by kind when `docs.diataxis` is `true`; runs `bin/docs-link-check.py` on the files it touched and repairs broken links | sonnet |
 | `devops` | CI, containers, packaging, version bumps, release | opus |
 | `verifier` | Runs gate commands (scope, freeze, checks) and reports exit codes and output verbatim; never fixes | sonnet |
 | `test-auditor` | Audits contract tests fail exactly as declared and are not tautologies; runs mutation probes | opus |

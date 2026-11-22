@@ -53,12 +53,25 @@
   recommend yes with each option's consequence, the lead at T1 or above and saying what it
   wrote; neither agent restates a rule only the pack states; the check is first run on
   known-bad variants as well;
+- the link check script `bin/docs-link-check.py` exists, is executable on disk and, once
+  tracked, in git; the docs-writer has Bash and a `## Checking links` section, after "Where
+  the text goes", that runs the command by its bare name on every file it created, edited,
+  moved or deleted (old paths included), says it reports links in those files and links to
+  them, repairs links in files under `docs.paths` and runs it again, lists under `gaps` the
+  links in files it may not edit and those it cannot repair, keeps to files, passes a moved
+  or deleted directory as the files it held, says what each exit code means and that a
+  failed run is not a pass, handles the lines printed with exit code 3 and lists each file
+  the command could not read under `gaps` (a correction in audit mode), repairs an `ignored by git` or `outside the repository` link only
+  by pointing it at a tracked file, runs it in audit mode and maps each line onto a
+  correction, and falls back by hand when the command is not found, the auditor reporting
+  corrections since it has no `gaps`; the check is first run on known-bad variants as well;
 - with --base: if anything under plugins/ changed since <ref>, the version changed too,
   because installs from git are cached by version and `claude plugin update` does
   nothing for an unchanged version.
 Exit 1 on any failure.
 """
 import json
+import os
 import re
 import subprocess
 import sys
@@ -1653,6 +1666,201 @@ for problem in diataxis_reach_problems({rel: (PLUGIN / rel).read_text() for rel 
 if len(errors) == errors_before_reach:
     ok(f"the Diátaxis pack, docs-writer, lead and init carry every behaviour the acceptance names "
        f"({len(BAD_REACH)} bad variants rejected)")
+
+
+# The docs-writer checks the links of what it wrote with the plugin's own command, called by its
+# bare name: the plugin's bin directory is on the agent's PATH, so the script must ship executable
+# (on disk and in git's index, where a clone takes its mode from), or the name is not found. Nothing
+# executes the prompt, so each behaviour the acceptance names is guarded by its wording, inside the
+# docs-writer's `## Checking links` section only, and the agent must keep the Bash tool that runs it.
+LINK_CHECK_REL = "bin/docs-link-check.py"
+LINK_CHECK_NAME = "docs-link-check.py"
+LINK_CHECK_HEADING = "## Checking links"
+LINK_CHECK_AFTER = "## Where the text goes"
+LINK_CHECK_RULES = [
+    (f"`{LINK_CHECK_NAME}`", "does not name the command"),
+    ("After writing or moving documentation", "does not run the command after writing or moving documentation"),
+    ("before you return", "does not run the command before it returns"),
+    ("from the repository root", "does not run the command from the repository root"),
+    ("created, edited, moved or deleted in this task",
+     "does not run the command on every documentation file it created, edited, moved or deleted"),
+    ("edited only to update a link", "does not pass a file it edited only to update a link"),
+    ("the old path of a file you moved or deleted", "does not pass the old path of a file it moved or deleted"),
+    ("the links in those files", "does not say the command reports the links in the files given"),
+    ("the links to those files", "does not say the command reports the links to the files given"),
+    ("Repair every reported link that sits in a file under `docs.paths`",
+     "does not repair the reported links in files under `docs.paths`"),
+    ("run the command again", "does not run the command again after a repair"),
+    ("in a file you may not edit", "does not list under `gaps` a link in a file it may not edit"),
+    ("cannot repair", "does not list under `gaps` a link it cannot repair"),
+    ("under `gaps` with file, line and target", "does not list a link it leaves under `gaps` with file, line and target"),
+    ("do not rewrite text to silence", "no longer forbids rewriting text to silence the check"),
+    ("takes files only", "no longer keeps the command to files"),
+    ("the old and the new path", "does not pass the old and the new path of what it moved under Diátaxis"),
+    ("In audit mode, run it", "does not run the command in audit mode"),
+    ("report each line it prints as a correction", "does not report a broken link as a correction in audit mode"),
+    ("When the command is not found, say so under `gaps`", "does not say what to do when the command is not found"),
+    ("check by hand", "does not check the links by hand when the command is not found"),
+    # A directory argument is misuse, and the old path of a moved directory names no file the
+    # command can match, so a moved or deleted directory is passed as the files it held.
+    ("passed as every file it held", "does not pass a moved or deleted directory as the files it held"),
+    ("each by its old path and its new path", "does not pass each file of a moved directory by its old and new path"),
+    ("never as the directory itself", "does not forbid passing a directory"),
+    # Misuse prints usage on stderr and nothing on stdout, which reads as a clean run unless the
+    # agent is told what each exit code means.
+    ("Exit code 0 means every link resolves", "does not say that exit code 0 is a pass"),
+    ("exit code 1 means each printed line needs handling", "does not say that exit code 1 means handling each line"),
+    ("Any other exit code", "does not say what any other exit code means"),
+    ("is not a pass", "does not say that a failed run is not a pass"),
+    ("fix the arguments and run it again", "does not fix its arguments and run again after a failed run"),
+    ("handle it as a command that cannot be found", "does not fall back when the command keeps failing"),
+    # Exit code 3 prints real broken links and names an unreadable file on stderr; read as "any
+    # other exit code", both would be dropped for a check by hand.
+    ("Exit code 3 means a file could not be read", "does not say what exit code 3 means"),
+    ("handle each printed line as for exit code 1", "does not handle the lines printed with exit code 3"),
+    ("each file a `cannot read` line on stderr names under `gaps`",
+     "does not list under `gaps` a file the command could not read"),
+    ("do not count the run as a pass", "does not say that a run with exit code 3 is not a pass"),
+    ("each file a `cannot read` line on stderr names as a correction",
+     "does not have the auditor report a file the command could not read as a correction"),
+    # These two kinds are not fixed by correcting a path, and the tempting fix is outside `docs.paths`.
+    ("`ignored by git` or `outside the repository`", "does not say how to repair a link to an ignored or outside target"),
+    ("pointing it at a tracked file that carries the same content",
+     "does not repair an ignored or outside target by pointing at a tracked file"),
+    ("never change ignore rules", "no longer forbids changing ignore rules to silence an ignored target"),
+    # The auditor returns `corrections` only: each printed line maps onto one, and its fallback
+    # cannot be `gaps`.
+    ("`file` is the linking file", "does not map a printed line onto a correction's `file`"),
+    ("`quoted` the link as written with its line", "does not map a printed line onto a correction's `quoted`"),
+    ("`true_statement` the target that exists when the diff shows it was renamed or moved",
+     "does not map a printed line onto a correction's `true_statement`"),
+    ("`evidence` the printed line", "does not map a printed line onto a correction's `evidence`"),
+    ("not found or keeps failing in audit mode", "does not say what the auditor does when the command is not found or fails"),
+    ("look up by hand", "does not have the auditor check the links by hand without the command"),
+    ("report each broken one as a correction", "does not have the auditor report a link it checked by hand as a correction"),
+]
+# A path to the command ties the prompt to one layout of the plugin; the contract calls it by name.
+LINK_CHECK_FORBIDDEN = [(f"/{LINK_CHECK_NAME}", "calls the command by a path instead of its bare name")]
+
+
+def link_check_script_problems(on_disk, executable, git_mode):
+    """Every way the link check script fails to ship runnable; git_mode is its index mode, None
+    while it is untracked."""
+    rel = f"plugins/conclave/{LINK_CHECK_REL}"
+    if not on_disk:
+        return [f"{rel}: missing; the docs-writer runs it by name"]
+    problems = []
+    if not executable:
+        problems.append(f"{rel}: not executable on disk, so the docs-writer cannot run it by name")
+    if git_mode is not None and git_mode != "100755":
+        problems.append(f"{rel}: tracked with mode {git_mode}, not 100755, so a clone cannot run it by name")
+    return problems
+
+
+def link_check_writer_problems(text):
+    """Every way docs-writer.md drops a behaviour of the link check, one message each, naming the file."""
+    problems = []
+    tools = anchored_line(text, "tools:")
+    if tools is None or "Bash" not in [t.strip() for t in tools.removeprefix("tools:").split(",")]:
+        problems.append(f"{DOCS_WRITER_REL}: the `tools` line does not grant Bash, which runs {LINK_CHECK_NAME}")
+    lines = [line.rstrip() for line in text.splitlines()]
+    checking = section(lines, LINK_CHECK_HEADING)
+    if checking is None:
+        problems.append(f"{DOCS_WRITER_REL}: no `{LINK_CHECK_HEADING}` section")
+        return problems
+    if LINK_CHECK_AFTER not in lines or lines.index(LINK_CHECK_AFTER) > lines.index(LINK_CHECK_HEADING):
+        problems.append(f"{DOCS_WRITER_REL}: `{LINK_CHECK_HEADING}` does not come after `{LINK_CHECK_AFTER}`")
+    body = " ".join(line.strip() for line in checking)
+    for needle, why in LINK_CHECK_RULES:
+        if needle not in body:
+            problems.append(f"{DOCS_WRITER_REL}: `{LINK_CHECK_HEADING}` {why} (missing {needle!r})")
+    for needle, why in LINK_CHECK_FORBIDDEN:
+        if needle in body:
+            problems.append(f"{DOCS_WRITER_REL}: `{LINK_CHECK_HEADING}` {why} (found {needle!r})")
+    return problems
+
+
+GOOD_LINK_CHECK_WRITER = (
+    "---\nname: docs-writer\ntools: Read, Edit, Bash, Skill\n---\n"
+    f"{LINK_CHECK_AFTER}\n\nPut the text where it belongs.\n\n"
+    f"{LINK_CHECK_HEADING}\n\n"
+    f"After writing or moving documentation, and before you return, run `{LINK_CHECK_NAME}` from the repository root "
+    "with every file you created, edited, moved or deleted in this task: a file you edited only to update a link, "
+    "and the old path of a file you moved or deleted. A directory is passed as every file it held, each by its old "
+    "path and its new path, never as the directory itself. It lists the links in those files and the links to those "
+    "files. Exit code 0 means every link resolves, exit code 1 means each printed line needs handling. Exit code 3 "
+    "means a file could not be read: handle each printed line as for exit code 1, list each file a `cannot read` "
+    "line on stderr names under `gaps`, and do not count the run as a pass. Any other "
+    "exit code is not a pass: fix the arguments and run it again, then handle it as a command that cannot be found. "
+    "Repair every reported link that sits in a file under `docs.paths`, then run the command again. A link reported "
+    "as `ignored by git` or `outside the repository` is repaired by pointing it at a tracked file that carries the "
+    "same content; never change ignore rules. A link in a file you may not edit, and one you cannot repair, goes "
+    "under `gaps` with file, line and target; do not rewrite text to silence the check. It takes files only. Under "
+    "Diátaxis pass the old and the new path. When the command is not found, say so under `gaps` and check by hand.\n\n"
+    "In audit mode, run it and report each line it prints as a correction: `file` is the linking file, `quoted` the "
+    "link as written with its line, `true_statement` the target that exists when the diff shows it was renamed or "
+    "moved, `evidence` the printed line. On exit code 3, also report each file a `cannot read` line on stderr "
+    "names as a correction. When the command is not found or keeps failing in audit mode, look up by "
+    "hand and report each broken one as a correction.\n\n"
+    "## As auditor\n\nAudit the docs.\n")
+
+
+def link_writer_case(old, new):
+    """GOOD_LINK_CHECK_WRITER with its one occurrence of old replaced by new."""
+    assert GOOD_LINK_CHECK_WRITER.count(old) == 1, old
+    return GOOD_LINK_CHECK_WRITER.replace(old, new)
+
+
+BAD_LINK_CHECK_WRITER = {f"docs-writer.md without {needle!r}": (link_writer_case(needle, ""), f"(missing {needle!r})")
+                         for needle, _ in LINK_CHECK_RULES}
+BAD_LINK_CHECK_WRITER.update({
+    "docs-writer.md without the section": (
+        link_writer_case(LINK_CHECK_HEADING, "## Links"), f"no `{LINK_CHECK_HEADING}` section"),
+    "docs-writer.md with the section before Where the text goes": (
+        link_writer_case(LINK_CHECK_AFTER, "## Placement").replace("## As auditor", LINK_CHECK_AFTER, 1),
+        "does not come after"),
+    "docs-writer.md calling the command by a path": (
+        link_writer_case("In audit mode, run it", f"In audit mode, run it as `${{CLAUDE_PLUGIN_ROOT}}/bin/{LINK_CHECK_NAME}`"),
+        "by a path instead of its bare name"),
+    "docs-writer.md without Bash": (
+        link_writer_case("tools: Read, Edit, Bash, Skill", "tools: Read, Edit, Skill"), "does not grant Bash"),
+    # A rule that survives only outside the section does not count.
+    "docs-writer.md with the fallback moved to As auditor": (
+        link_writer_case("say so under `gaps` and check by hand.", "say so under `gaps`.").replace(
+            "Audit the docs.", "Check by hand: check by hand."),
+        "(missing 'check by hand')"),
+})
+BAD_LINK_CHECK_SCRIPT = {
+    "the script missing": ((False, False, None), "missing"),
+    "the script not executable on disk": ((True, False, None), "not executable on disk"),
+    "the script tracked without its executable bit": ((True, True, "100644"), "tracked with mode 100644"),
+}
+
+errors_before_link_check = len(errors)
+for args in [(True, True, None), (True, True, "100755")]:
+    if link_check_script_problems(*args):
+        fail(f"link check script check rejects a runnable script {args}: {link_check_script_problems(*args)}")
+if link_check_writer_problems(GOOD_LINK_CHECK_WRITER):
+    fail(f"link check writer check rejects a valid docs-writer.md: {link_check_writer_problems(GOOD_LINK_CHECK_WRITER)}")
+for case, (args, expected) in BAD_LINK_CHECK_SCRIPT.items():
+    got = link_check_script_problems(*args)
+    if len(got) != 1 or expected not in got[0] or not got[0].startswith(f"plugins/conclave/{LINK_CHECK_REL}:"):
+        fail(f"link check script check on {case}: expected one problem containing {expected!r}, got {got}")
+for case, (text, expected) in BAD_LINK_CHECK_WRITER.items():
+    got = link_check_writer_problems(text)
+    if len(got) != 1 or expected not in got[0] or not got[0].startswith(f"{DOCS_WRITER_REL}:"):
+        fail(f"link check writer check on {case}: expected one problem containing {expected!r}, got {got}")
+link_script = PLUGIN / LINK_CHECK_REL
+index_entry = subprocess.run(["git", "ls-files", "--stage", "--", str(link_script.relative_to(ROOT))],
+                             cwd=ROOT, capture_output=True, text=True).stdout.split()
+for problem in (link_check_script_problems(link_script.is_file(), os.access(link_script, os.X_OK),
+                                           index_entry[0] if index_entry else None)
+                + link_check_writer_problems((PLUGIN / DOCS_WRITER_REL).read_text())):
+    fail(problem)
+if len(errors) == errors_before_link_check:
+    ok(f"{LINK_CHECK_NAME} ships executable and the docs-writer runs it as the acceptance names "
+       f"({len(BAD_LINK_CHECK_SCRIPT) + len(BAD_LINK_CHECK_WRITER)} bad variants rejected)")
+
 
 if "--base" in sys.argv:
     base = sys.argv[sys.argv.index("--base") + 1]

@@ -415,8 +415,9 @@ defined by `profile.stakes`.
 
 ### Mechanical gates (`bin/`)
 
-Generic scripts any project can run; QA and the verifier call them with arguments from
-the profile, never from a project script:
+Generic scripts any project can run. QA and the verifier call the first four with
+arguments from the profile, never from a project script; the docs-writer calls
+`docs-link-check.py` with the documentation files the task touched:
 
 | Script | Does |
 |---|---|
@@ -424,9 +425,21 @@ the profile, never from a project script:
 | `freeze.sh freeze <file>...` / `freeze.sh verify` | prints sha256 lines; verifies them from stdin; exit 1 on any change |
 | `shortcut-audit.sh <base> --scope … --tests …` | suppressions, weakened tests, swallowed errors, debt markers, removed assertions, test-count drop |
 | `diff-coverage.sh <report> <base> <min> [--src-root] [--include …]` | diff-cover on a component's coverage report |
+| `docs-link-check.py <file>...` | broken Markdown links in the given files, and links from any Markdown file git lists to them; exit 0 clean, 1 broken links, 2 misuse or git failure, 3 a file could not be read |
 
 A project may list its own gate script in a component's `checks` or in `gates.extra`;
 Conclave never depends on one.
+
+`docs-link-check.py` is run by the docs-writer, not by QA or the verifier. It takes the
+documentation files the task created, edited, moved or deleted, each moved or deleted file
+by its old path; a path no longer on disk is read as moved or deleted, so links to it are
+reported. It prints `<file>:<line>: <kind>: <target>` on stdout, where kind is `missing
+file`, `missing anchor`, `ignored by git` or `outside the repository`. Links in fenced
+code, code spans and HTML comments, and web or `mailto:` links, are not checked. It changes
+nothing and needs only Python and git. On exit 3 the printed lines are still valid, but the
+check is incomplete: the docs-writer lists each file named by a `cannot read` line on
+stderr under `gaps`, and the auditor reports it as a correction, because its return shape
+has no `gaps`. Repository style is left to the project; the script checks links only.
 
 ### File ownership
 

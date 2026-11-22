@@ -65,10 +65,12 @@
     {
       "name": "bin",
       "paths": ["plugins/conclave/bin/"],
-      "stacks": ["shell"],
+      "tests": ["tests/test_docs_links.py"],
+      "stacks": ["shell", "python"],
       "checks": [
         "bash -n plugins/conclave/bin/*.sh",
-        "shellcheck --severity=warning plugins/conclave/bin/*.sh"
+        "shellcheck --severity=warning plugins/conclave/bin/*.sh",
+        "python3 -I tests/test_docs_links.py"
       ],
       "conventions": [
         "Gate scripts are generic: they take the project's paths and refs as arguments and read nothing project-specific from the environment."

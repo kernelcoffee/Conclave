@@ -425,7 +425,7 @@ arguments from the profile, never from a project script; the docs-writer calls
 | `freeze.sh freeze <file>...` / `freeze.sh verify` | prints sha256 lines; verifies them from stdin; exit 1 on any change |
 | `shortcut-audit.sh <base> --scope … --tests …` | suppressions, weakened tests, swallowed errors, debt markers, removed assertions, test-count drop |
 | `diff-coverage.sh <report> <base> <min> [--src-root] [--include …]` | diff-cover on a component's coverage report |
-| `docs-link-check.py <file>...` | broken Markdown links in the given files, and links from any Markdown file git lists to them; exit 0 clean, 1 broken links, 2 misuse or git failure, 3 a file could not be read |
+| `docs-link-check.py [--web] <file>...` | broken Markdown links in the given files, and links from any Markdown file git lists to them; with `--web`, dead web links of the given files too; exit 0 clean, 1 broken or dead links, 2 misuse or git failure, 3 check incomplete (a file could not be read, or no web address got an answer) |
 
 A project may list its own gate script in a component's `checks` or in `gates.extra`;
 Conclave never depends on one.
@@ -435,11 +435,40 @@ documentation files the task created, edited, moved or deleted, each moved or de
 by its old path; a path no longer on disk is read as moved or deleted, so links to it are
 reported. It prints `<file>:<line>: <kind>: <target>` on stdout, where kind is `missing
 file`, `missing anchor`, `ignored by git` or `outside the repository`. Links in fenced
-code, code spans and HTML comments, and web or `mailto:` links, are not checked. It changes
-nothing and needs only Python and git. On exit 3 the printed lines are still valid, but the
+code, code spans and HTML comments, and `mailto:` and other non-web links, are not checked;
+web links are not checked either unless `--web` is given. It changes nothing and needs only
+Python and git. On exit 3 the printed lines are still valid, but the
 check is incomplete: the docs-writer lists each file named by a `cannot read` line on
 stderr under `gaps`, and the auditor reports it as a correction, because its return shape
 has no `gaps`. Repository style is left to the project; the script checks links only.
+
+#### Web links (`--web`)
+
+The web check is opt-in and is triggered by the user, by running `docs-link-check.py --web
+<file>...` or asking for it in plain words; no agent or skill passes `--web`. Without it no
+connection is opened and the output is that of the offline check. With it, the `http:` and
+`https:` targets in the given Markdown files are requested after the offline pass: one GET per
+distinct address with its `#fragment` dropped, eight at a time, at most 200 addresses, ten
+seconds to connect and ten to answer, at most five redirects, no proxy, cookie or
+authorization.
+
+| Answer | Result |
+|---|---|
+| 404 or 410 | `<file>:<line>: dead link: <address>` on stdout, exit 1 |
+| a host name that does not resolve, when another address of the run got an HTTP answer | `dead link` |
+| 2xx | nothing |
+| any other: 401, 403, 429 or other 4xx, 5xx, timeout, TLS failure, refused connection, too many redirects, redirect to another scheme, limit reached | `could not verify <file>:<line>: <address>: <reason>` on stderr, exit code unchanged unless no address of the run got an HTTP answer (see below) |
+
+Safety rules: every hop is vetted before it is requested, and the connection goes to the
+address vetted, not to a second lookup. A host that is, or resolves to, a loopback, private,
+link-local, shared, reserved or multicast address (including number forms such as
+`http://2130706433/` and IPv4-mapped IPv6) is never requested (`local or private address`),
+nor is an address carrying a user name or password (`carries credentials`, printed with
+`***@` in place of them), nor an `https:` address on a Python built without `ssl`. A redirect
+to a local address or to a scheme other than `http:` or `https:` is not followed. When
+addresses were tried and none got an HTTP answer (whatever the reason: not resolving,
+timeout, TLS failure, refused connection), nothing is called dead for not resolving, stderr
+says the web could not be reached, and the exit code is 3.
 
 ### File ownership
 

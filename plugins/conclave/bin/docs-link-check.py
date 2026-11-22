@@ -1,26 +1,49 @@
 #!/usr/bin/env python3
 """Broken Markdown links in, and to, the files given. Lists every broken link that sits
 in one of the given files, or that sits in any Markdown file git lists and points at one
-of them. Changes nothing and never reads standard input.
+of them; with --web, also the dead web links of the given files. Changes nothing and
+never reads standard input.
 
     docs-link-check.py <file>...
+    docs-link-check.py --web <file>...
 
   Each <file> is a path relative to the current directory, or absolute, inside the
   repository. A path that is no longer on disk is a file, or a directory, that was
   moved or deleted: links to it, to anything under it, and to a directory that held
-  it, are reported. Files only: no directory on disk, pattern or option (name a file
-  that starts with `-` as `./-name`).
+  it, are reported. Files, and `--web` anywhere among them, only: no directory on
+  disk, pattern or other option (name a file that starts with `-` as `./-name`).
 
   Prints `<file>:<line>: <kind>: <target>` on stdout, sorted by file then line, paths
   relative to the repository root, where <kind> is `missing file`, `missing anchor`,
-  `ignored by git` or `outside the repository`; then a count on stderr. Control
-  characters in a path or target are printed as `\\xNN` or `\\uNNNN` escapes.
+  `ignored by git`, `outside the repository` or, with --web, `dead link`; then a count
+  on stderr. Control characters in a path or target are printed as `\\xNN` or
+  `\\uNNNN` escapes.
 
-  Exit 0 when nothing is broken, 1 when a link is broken, 2 on misuse (no file, a
-  directory, a path outside the repository or a symbolic link leaving it, an option,
-  not inside a git repository) or when git fails, with nothing on stdout. Exit 3 when
-  a file cannot be read: a `cannot read <file>` line goes to stderr, the run goes on,
-  and every broken link found is still printed, but the check is incomplete.
+  Without --web no connection is ever opened. With it, the `http:` and `https:`
+  targets of the links, images and reference definitions of the given Markdown files
+  are requested too: one GET per distinct address, its `#fragment` dropped, a few at
+  a time, at most 200 addresses, ten seconds to connect and ten to answer, five
+  redirects at most; no proxy, cookie, authorization or body. An address that answers
+  404 or 410 is a `dead link`, and so is a host name that does not resolve when
+  another address of the run got an HTTP answer. Any other answer but 2xx is one line
+  per place on stderr, `could not verify <file>:<line>: <address>: <reason>`, and
+  changes no exit code: a refusal (401, 403, 429), any other 4xx, a server error, a
+  timeout, a TLS failure, a refused connection, too many redirects or a redirect to
+  another scheme, the limit, an https address on a Python built without the ssl
+  module (never requested; the offline check does not need ssl), an address carrying
+  a user name or password (never requested, printed without them), and an address
+  whose host is, or resolves to, a loopback, private, link-local, shared, reserved or
+  multicast address (never requested, at any hop; the connection goes to the address
+  vetted).
+
+  Exit 0 when nothing is broken, 1 when a link is broken or dead, 2 on misuse (no
+  file, `--web` without a file, a directory, a path outside the repository or a
+  symbolic link leaving it, another option, not inside a git repository) or when git
+  fails, with nothing on stdout. Exit 3 when the check is incomplete; the run goes on
+  and every broken link found is still printed. That is when a file cannot be read
+  (a `cannot read <file>` line goes to stderr), and, with --web, when addresses were
+  tried and none got an HTTP answer: stderr says the web could not be reached, and no
+  host is called dead for not resolving.
 
   Links inside fenced code blocks, code spans and HTML comments are not read. A target
   whose real path, symbolic links followed, leaves the repository is outside it. Files
@@ -35,17 +58,23 @@ Runs from anywhere inside the repository. Python standard library and git only.
 from __future__ import annotations
 
 import bisect
+import enum
 import html
+import importlib
 import io
+import ipaddress
 import os
 import posixpath
 import re
+import socket
 import subprocess
 import sys
+import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import NoReturn
-from urllib.parse import unquote
+from urllib.parse import quote, unquote, urljoin, urlsplit
 
 PROG = "docs-link-check.py"
 MARKDOWN_SUFFIXES = (".md", ".markdown")
@@ -54,9 +83,12 @@ MISSING_FILE = "missing file"
 MISSING_ANCHOR = "missing anchor"
 IGNORED = "ignored by git"
 OUTSIDE = "outside the repository"
+DEAD = "dead link"
 
-# Exit code of a run that could not read every file it had to.
+# Exit code of a run that could not read every file it had to, or could not reach the web.
 INCOMPLETE = 3
+
+WEB_OPTION = "--web"
 
 # Browsers scroll to the top of the page for `#top` when no element carries that id.
 TOP_FRAGMENT = "top"
@@ -805,7 +837,8 @@ def resolve(source: str, path: str) -> str | None:
     return "" if normal == "." else normal
 
 
-def broken_links(repository: Repository) -> set[tuple[str, int, str, str]]:
+def broken_links(repository: Repository, web_links: list[WebLink] | None = None) -> set[tuple[str, int, str, str]]:
+    """The broken links; the web links of the given files go to web_links when it is a list."""
     found: set[tuple[str, int, str, str]] = set()
     for source in repository.readers():
         source_given = source in repository.given
@@ -815,6 +848,8 @@ def broken_links(repository: Repository) -> set[tuple[str, int, str, str]]:
         for line, raw in link_targets(text):
             parts = split_target(raw)
             if parts is None:
+                if web_links is not None and source_given and (address := web_address(raw)) is not None:
+                    web_links.append(WebLink(source, line, raw, address))
                 continue
             path, fragment = parts
             target = resolve(source, path)
@@ -830,24 +865,395 @@ def broken_links(repository: Repository) -> set[tuple[str, int, str, str]]:
     return found
 
 
+# ---- Web links (--web only)
+
+# Bounds of a run, read each time a request is made.
+TIMEOUT = 10.0
+MAX_REDIRECTS = 5
+WEB_LIMIT = 200
+WORKERS = 8
+HEAD_LIMIT = 64 * 1024
+USER_AGENT = PROG
+
+WEB_SCHEMES = ("http", "https")
+WEB_TARGET = re.compile(r"^https?:", re.IGNORECASE)
+GONE = frozenset({404, 410})
+REDIRECTS = frozenset({301, 302, 303, 307, 308})
+# getaddrinfo's answers for a name that does not exist, as opposed to a lookup that failed.
+NOT_FOUND = frozenset({socket.EAI_NONAME, *((socket.EAI_NODATA,) if hasattr(socket, "EAI_NODATA") else ())})
+# A host name or address literal as urlsplit gives it, lowercased, once IDNA-encoded.
+HOST_NAME = re.compile(r"[a-z0-9._:-]+")
+# Characters left as they are in a request path and query; any other is percent-encoded.
+PATH_SAFE = "/%:@!$&'()*+,;=~"
+QUERY_SAFE = PATH_SAFE + "?"
+# A scheme, the slashes after it and the user information up to the last `@` of the host part.
+USER_INFO = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*:/*)[^/?#]*@")
+HEAD_END = re.compile(rb"\r?\n\r?\n")
+LINE_END = re.compile(rb"\r?\n")
+STATUS_LINE = re.compile(rb"HTTP/\d(?:\.\d)? (\d{3})(?: |$)")
+
+LOCAL = "local or private address"
+CREDENTIALS = "carries credentials"
+INVALID = "invalid address"
+OTHER_SCHEME = "redirect to another scheme"
+NO_LOCATION = "redirect without a location"
+TOO_MANY_REDIRECTS = "too many redirects"
+LIMIT_REACHED = "limit reached"
+TIMED_OUT = "timed out"
+TLS_FAILURE = "TLS failure"
+TLS_UNAVAILABLE = "TLS unavailable"
+HOST_NOT_FOUND = "host not found"
+LOOKUP_FAILED = "name lookup failed"
+BAD_ANSWER = "not an HTTP answer"
+
+IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+SocketAddress = tuple[str, int] | tuple[str, int, int, int]
+
+
+@dataclass(frozen=True, order=True)
+class WebLink:
+    """One place that links to a web address: the address is the target without its fragment."""
+
+    source: str
+    line: int
+    raw: str
+    address: str
+
+
+@dataclass(frozen=True)
+class Target:
+    """A vetted hop: where to connect and what to send."""
+
+    secure: bool
+    host: str
+    authority: str
+    path: str
+    addresses: tuple[tuple[int, SocketAddress], ...]
+
+
+class Unverified(Exception):
+    """The address could not be verified, for the reason given."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class Refused(Unverified):
+    """The address is not requested: nothing was sent to it."""
+
+
+class HostNotFound(Exception):
+    """The host name does not resolve."""
+
+
+class Verdict(enum.Enum):
+    FINE = enum.auto()
+    DEAD = enum.auto()
+    UNVERIFIED = enum.auto()
+    UNRESOLVED = enum.auto()
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """What one address gave: tried when the network was used for it, answered when an HTTP answer came."""
+
+    verdict: Verdict
+    reason: str = ""
+    tried: bool = False
+    answered: bool = False
+
+
+@dataclass
+class WebReport:
+    dead: set[tuple[str, int, str, str]] = field(default_factory=set)
+    unverified: set[tuple[str, int, str, str]] = field(default_factory=set)
+    unreachable: bool = False
+
+
+def web_address(raw: str) -> str | None:
+    """The address to request for an `http:` or `https:` link target, or None for any other target."""
+    target = ESCAPED_PUNCTUATION.sub(r"\1", raw)
+    return target.partition("#")[0] if WEB_TARGET.match(target) else None
+
+
+def shown(raw: str) -> str:
+    """The target as written, or without its user name and password when it carries them."""
+    target = ESCAPED_PUNCTUATION.sub(r"\1", raw)
+    hidden = USER_INFO.sub(r"\1***@", target)
+    return raw if hidden == target else hidden
+
+
+def is_public(address: IPAddress) -> bool:
+    """Whether a request may go to this address: a global unicast address, nothing local,
+    private, shared, reserved or multicast, and no IPv4 address of that kind mapped in IPv6."""
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.ipv4_mapped is not None:
+            return is_public(address.ipv4_mapped)
+        if address.is_site_local:
+            return False
+    return address.is_global and not address.is_multicast and not address.is_reserved
+
+
+def lookup(host: str, port: int) -> list[tuple[int, SocketAddress]]:
+    """Every IPv4 and IPv6 address the host resolves to, with its address family."""
+    found: list[tuple[int, SocketAddress]] = []
+    for family, _, _, _, address in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
+        if family == socket.AF_INET:
+            found.append((family, (str(address[0]), int(address[1]))))
+        elif family == socket.AF_INET6:
+            found.append((family, (str(address[0]), int(address[1]), int(address[2]), int(address[3]))))
+    return found
+
+
+def vet(url: str) -> Target:
+    """Where a request for url goes, once every address of its host is known to be public.
+
+    Raises Refused for an address that must not be requested, HostNotFound for a host
+    that does not resolve and Unverified for a lookup that failed.
+    """
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError as error:
+        raise Refused(INVALID) from error
+    scheme = parts.scheme.lower()
+    if scheme not in WEB_SCHEMES:
+        raise Refused(OTHER_SCHEME)
+    if "@" in parts.netloc:
+        raise Refused(CREDENTIALS)
+    try:
+        host = (parts.hostname or "").encode("idna").decode("ascii")
+    except UnicodeError as error:
+        raise Refused(INVALID) from error
+    if not HOST_NAME.fullmatch(host):
+        raise Refused(INVALID)
+    secure = scheme == "https"
+    if secure and not tls_available():
+        raise Refused(TLS_UNAVAILABLE)
+    try:
+        addresses = lookup(host, port if port is not None else 443 if secure else 80)
+    except socket.gaierror as error:
+        if error.errno in NOT_FOUND:
+            raise HostNotFound from error
+        raise Unverified(LOOKUP_FAILED) from error
+    except UnicodeError as error:
+        raise Refused(INVALID) from error
+    if not addresses:
+        raise Unverified(LOOKUP_FAILED)
+    if not all(is_public(ipaddress.ip_address(address[0])) for _, address in addresses):
+        raise Refused(LOCAL)
+    authority = f"[{host}]" if ":" in host else host
+    if port is not None:
+        authority = f"{authority}:{port}"
+    path = quote(parts.path or "/", safe=PATH_SAFE)
+    if parts.query:
+        path = f"{path}?{quote(parts.query, safe=QUERY_SAFE)}"
+    return Target(secure=secure, host=host, authority=authority, path=path, addresses=tuple(addresses))
+
+
+def tls_available() -> bool:
+    """Whether this Python has the ssl module. A Python can be built without it, so only an
+    https hop loads it: the offline check, and http addresses, run without it."""
+    try:
+        importlib.import_module("ssl")
+    except ImportError:
+        return False
+    return True
+
+
+def connect(target: Target) -> socket.socket:
+    """A socket connected to the first vetted address that accepts; never a new lookup.
+
+    A timeout ends the attempt; another failure moves on to the next address.
+    """
+    failures: list[OSError] = []
+    for family, address in target.addresses:
+        connection = socket.socket(family, socket.SOCK_STREAM)
+        connection.settimeout(TIMEOUT)
+        try:
+            connection.connect(address)
+        except TimeoutError:
+            connection.close()
+            raise
+        except OSError as error:
+            connection.close()
+            failures.append(error)
+            continue
+        return connection
+    raise failures[-1]
+
+
+def read_head(connection: socket.socket) -> tuple[int, str | None]:
+    """The status code and Location header of the final answer; the body is never read."""
+    deadline = time.monotonic() + TIMEOUT
+    data = b""
+    while True:
+        end = HEAD_END.search(data)
+        if end is not None:
+            lines = LINE_END.split(data[: end.start()])
+            data = data[end.end() :]
+            status = STATUS_LINE.match(lines[0])
+            if status is None:
+                raise Unverified(BAD_ANSWER)
+            code = int(status.group(1))
+            if 100 <= code < 200:
+                continue
+            location = None
+            for header in lines[1:]:
+                name, _, value = header.partition(b":")
+                if name.strip().lower() == b"location":
+                    location = value.strip().decode("latin-1")
+            return code, location
+        if len(data) > HEAD_LIMIT:
+            raise Unverified(BAD_ANSWER)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError
+        connection.settimeout(remaining)
+        chunk = connection.recv(8192)
+        if not chunk:
+            raise Unverified(BAD_ANSWER)
+        data += chunk
+
+
+def exchange(target: Target) -> tuple[int, str | None]:
+    """Send one GET to the vetted target and read the answer's head."""
+    request = (
+        f"GET {target.path} HTTP/1.1\r\nHost: {target.authority}\r\nUser-Agent: {USER_AGENT}\r\n"
+        "Accept: */*\r\nConnection: close\r\n\r\n"
+    ).encode("ascii")
+    try:
+        connection = connect(target)
+    except TimeoutError as error:
+        raise Unverified(TIMED_OUT) from error
+    except OSError as error:
+        raise Unverified(connection_failure(error)) from error
+    try:
+        if target.secure:
+            return exchange_tls(connection, target.host, request)
+        connection.sendall(request)
+        return read_head(connection)
+    except TimeoutError as error:
+        raise Unverified(TIMED_OUT) from error
+    except OSError as error:
+        raise Unverified(connection_failure(error)) from error
+    finally:
+        connection.close()
+
+
+def exchange_tls(connection: socket.socket, host: str, request: bytes) -> tuple[int, str | None]:
+    """The exchange over TLS, the certificate checked against the host name.
+
+    ssl is imported here, not when the script loads: vet() has made sure it is there.
+    """
+    import ssl
+
+    try:
+        with ssl.create_default_context().wrap_socket(connection, server_hostname=host) as secured:
+            secured.sendall(request)
+            return read_head(secured)
+    except ssl.SSLError as error:
+        raise Unverified(TLS_FAILURE) from error
+
+
+def connection_failure(error: OSError) -> str:
+    if isinstance(error, ConnectionRefusedError):
+        return "connection refused"
+    if isinstance(error, ConnectionResetError):
+        return "connection reset"
+    return f"connection failed: {error.strerror or type(error).__name__}"
+
+
+def check_address(address: str) -> Outcome:
+    """Request one address, following redirects by hand; every hop is vetted first."""
+    url = address
+    redirects = 0
+    answered = False
+    while True:
+        try:
+            target = vet(url)
+        except Refused as refusal:
+            # Nothing went out for this hop; the hops before it, if any, were answered.
+            return Outcome(Verdict.UNVERIFIED, refusal.reason, tried=answered, answered=answered)
+        except HostNotFound:
+            return Outcome(Verdict.UNRESOLVED, HOST_NOT_FOUND, tried=True, answered=answered)
+        except Unverified as failure:
+            return Outcome(Verdict.UNVERIFIED, failure.reason, tried=True, answered=answered)
+        try:
+            status, location = exchange(target)
+        except Unverified as failure:
+            return Outcome(Verdict.UNVERIFIED, failure.reason, tried=True, answered=answered)
+        answered = True
+        if 200 <= status < 300:
+            return Outcome(Verdict.FINE, tried=True, answered=True)
+        if status in GONE:
+            return Outcome(Verdict.DEAD, tried=True, answered=True)
+        if status not in REDIRECTS:
+            return Outcome(Verdict.UNVERIFIED, f"HTTP {status}", tried=True, answered=True)
+        if location is None:
+            return Outcome(Verdict.UNVERIFIED, NO_LOCATION, tried=True, answered=True)
+        if redirects == MAX_REDIRECTS:
+            return Outcome(Verdict.UNVERIFIED, TOO_MANY_REDIRECTS, tried=True, answered=True)
+        redirects += 1
+        try:
+            url = urljoin(url, location)
+            scheme = urlsplit(url).scheme.lower()
+        except ValueError:
+            return Outcome(Verdict.UNVERIFIED, INVALID, tried=True, answered=True)
+        if scheme not in WEB_SCHEMES:
+            return Outcome(Verdict.UNVERIFIED, OTHER_SCHEME, tried=True, answered=True)
+
+
+def check_web(links: list[WebLink]) -> WebReport:
+    """Request each distinct address once, the first WEB_LIMIT of them, and sort out every place."""
+    places: dict[str, list[WebLink]] = {}
+    for link in sorted(links):
+        places.setdefault(link.address, []).append(link)
+    checked = list(places)[:WEB_LIMIT]
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        outcomes = dict(zip(checked, pool.map(check_address, checked), strict=True))
+    answered = any(outcome.answered for outcome in outcomes.values())
+    tried = any(outcome.tried for outcome in outcomes.values())
+    result = WebReport(unreachable=tried and not answered)
+    for address, linked in places.items():
+        outcome = outcomes.get(address, Outcome(Verdict.UNVERIFIED, LIMIT_REACHED))
+        dead = outcome.verdict is Verdict.DEAD or (outcome.verdict is Verdict.UNRESOLVED and answered)
+        for link in linked:
+            if dead:
+                result.dead.add((link.source, link.line, DEAD, link.raw))
+            elif outcome.verdict is not Verdict.FINE:
+                result.unverified.add((link.source, link.line, link.raw, outcome.reason))
+    return result
+
+
 def main(arguments: list[str]) -> int:
-    if not arguments:
+    web = WEB_OPTION in arguments
+    files = [argument for argument in arguments if argument != WEB_OPTION]
+    if not files:
         usage("no file given")
-    for argument in arguments:
+    for argument in files:
         if argument.startswith("-"):
             usage(f"unknown option: {argument}")
     cwd = os.getcwd()
     root = repository_root(cwd)
-    given = {given_path(argument, cwd, root) for argument in arguments}
+    given = {given_path(argument, cwd, root) for argument in files}
     repository = Repository(root=root, known=known_files(root), given=given)
-    found = broken_links(repository)
+    web_links: list[WebLink] | None = [] if web else None
+    found = broken_links(repository, web_links)
+    checked = check_web(web_links) if web_links else WebReport()
+    found |= checked.dead
     report(found)
+    for source, line, raw, reason in sorted(checked.unverified):
+        print(f"could not verify {printable(source)}:{line}: {printable(shown(raw))}: {reason}", file=sys.stderr)
+    if checked.unreachable:
+        complain("the web could not be reached: no web address got an answer, no host is called dead")
     for path in sorted(repository.unchecked):
         complain(f"not checked out, links into it not checked: {path}")
     for path, reason in sorted(repository.failures.items()):
         complain(f"cannot read {path}: {reason}")
     complain(f"{len(found)} broken link{'' if len(found) == 1 else 's'}")
-    if repository.failures:
+    if repository.failures or checked.unreachable:
         return INCOMPLETE
     return 1 if found else 0
 

@@ -286,6 +286,21 @@ docs-writer may not edit are reported to the lead. The rules are in
 `plugins/conclave/skills/writing-docs/SKILL.md`, section "Diátaxis". This repository's
 own documentation does not use it.
 
+### Checking web links
+
+The docs-writer's link check stays inside the project. To find dead web links, run it
+yourself with `--web` and the documentation files to check:
+
+```bash
+docs-link-check.py --web README.md docs/guide.md
+```
+
+A page that answers 404 or 410 is printed as `<file>:<line>: dead link: <address>`; an
+address it cannot judge (refusal, server error, timeout, local or private address) is
+listed on stderr as `could not verify` and changes no exit code, unless addresses were
+requested and none got an HTTP answer (a lone timeout, every connection refused): then
+stderr says the web could not be reached and the exit code is 3. No agent runs it.
+
 ## Stack packs
 
 | Pack | Covers |

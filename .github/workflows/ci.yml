@@ -38,6 +38,9 @@ jobs:
           bash -n plugins/conclave/bin/*.sh
           shellcheck --severity=warning plugins/conclave/bin/*.sh
 
+      - name: Link check script
+        run: python3 -I tests/test_docs_links.py
+
       - name: Guardrail hooks
         run: python3 -I plugins/conclave/hooks/test_guard.py
 

@@ -89,10 +89,14 @@ node tests/workflows.test.mjs                     # workflow control flow, fake 
    before writing the specs; correct it there or confirm it. At T3 and in `/conclave:plan`
    the architect writes the Analysis in a stage of its own and the run stops the same way,
    before the pm specs anything; a correction that needs more reading of the code sends the
-   architect back to it. At T1 the Analysis opens the summary at the approval stop.
+   architect back to it. At T1 the Analysis opens the summary at the approval stop. Each
+   Unknown comes with what would settle it and the lead's recommendation.
 3. You approve the plan. Nothing is built until you approve the plan document, at any
    pace; the functional spec is what you approve, and the technical spec serves it. Edit
-   the document instead of replying if you prefer; the lead re-reads it. A redesign or a
+   the document instead of replying if you prefer; the lead re-reads it. At the approval
+   the lead tells you that you can switch the session to the mode that accepts edits without
+   asking, and what will still wait for your word; it never switches the mode itself, and
+   reminds you to switch back when the run ends. A redesign or a
    new feature with an open shape gets `--design`: a design study proposes the model and
    argues the alternatives, on the Analysis you confirmed, before the spec is written.
 4. One stage at a time. With the default pace, the lead pauses after each of build,
@@ -108,7 +112,9 @@ node tests/workflows.test.mjs                     # workflow control flow, fake 
    documents, and the lead adds `docs/plans/` and `.claude/conclave/` to `.gitignore`
    (its own uncommitted ignore lines come first, as a `chore` commit). Set
    `docs.commit_plans: true`, or ask in the task, to commit the plan in the first slice.
-   Nothing is committed until you approve, and the guardrails ask you for every commit.
+   Files are staged by name. Nothing is committed until you approve, and the guardrails
+   ask you for every commit. After the last commit the lead asks, as a separate question,
+   whether to push the branch (`git push -u <remote> <branch>`) and open the pull request.
 
 ```mermaid
 flowchart LR
@@ -126,6 +132,29 @@ is a pause you release.
 
 Add `--dry-run` to see the triage and the plan without spending anything, `--tier N` to
 force a tier, `--design` to force the design study (the proposal, after the analysis).
+
+## Rules
+
+The lead follows twelve standing rules, whatever the task. The first four hold at every
+moment; the next seven come in the order a task meets them; the last is about the lead's
+own work. "Enforced by" names the guardrail that blocks or asks (see
+[Guardrails](#guardrails)); where it says "the lead", the rule is an instruction in the
+lead's prompt and nothing else enforces it.
+
+| Rule | What it means | Enforced by |
+|---|---|---|
+| Plan first | Nothing is built before you approve the plan document, at any tier above T0 and at any pace. | the lead |
+| Functional over technical | The functional spec is the authority. A brief, a design or a finding that traces to no goal or acceptance criterion is logged as a candidate for a later task, not built. | the lead |
+| The user's word | Only these wait for you: confirming the Analysis, approving the plan, each decision, the go after a stage at pace `step`, creating a branch, creating the commits, pushing and opening the pull request, and a prompt a guardrail raises. An answer is never guessed, and a decision you made is never reopened. | the lead; `commit-approval` and `pii` raise the prompts |
+| Guardrails | A denied call is never worked around. When a guardrail blocks something you want, such as rewriting history, the lead prepares what it may and gives you the exact commands to run. | every guardrail rule |
+| Small slices | A request that holds several independent changes is proposed as separate tasks, run one at a time. | the lead |
+| Tier before tokens | The tier and the agent estimate are stated before anything is spent, and the actual count after each stage. | the lead |
+| Branch | Before the first edit, at every tier, when `git.branch_prefix` is set in the profile, the lead proposes a branch from the profile's base ref and waits for your yes, if the current branch is the default one or belongs to another task; with no prefix it proposes none. A dirty tree is settled with you first. On another task's branch you can instead branch from the current commit or stay; at T0 and T1 you can decline on the default branch too. | the lead; `protect-history` blocks a push to the default branch |
+| Unknowns with a recommendation | At the analysis checkpoint each Unknown comes with what would settle it and the lead's recommendation. | the lead |
+| After approval | At the approval gate the lead tells you that you can switch the session to the mode that accepts edits without asking, and what will still wait for your word. That mode covers edits only: a shell command can still ask, depending on your own permission settings. The lead reminds you to switch back when the run ends, and never changes the mode itself. | the lead |
+| Commits | Nothing is committed without your word. Files are staged by name, never the whole tree, and subagents never commit. | `commit-approval`, `subagent-no-git` |
+| Push and pull request | After the last commit the lead asks, as a separate question, whether to push the branch and open the pull request. | `commit-approval`, `protect-history` |
+| Your own work | The lead takes no shortcut in its own edits, summarises what subagents return, records a finding it judges wrong with the reason, and fixes the profile when it is wrong. | the lead |
 
 ## Tiers
 

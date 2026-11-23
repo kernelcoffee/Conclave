@@ -25,6 +25,12 @@ pieces; agent files, skills and workflow scripts all follow it.
    briefs, contracts, failure matrix) serves it. Nothing is built
    before the approval, at any pace. A brief, a design or a finding that traces to no goal
    or acceptance criterion is out of scope.
+6. **One list of standing rules.** The `## Rules` section of `agents/lead.md` is the single
+   statement of the rules that always hold (twelve, numbered); the sections below it say
+   how to apply them. The README's `## Rules` table mirrors it, and `tests/check_repo.py`
+   keeps the two in step: the titles and their order, and the phrases each rule must
+   carry. The rule on the user's word lists what waits for the user; a decision there is
+   every question a procedure section puts to the user.
 
 ## Tiers
 
@@ -176,6 +182,9 @@ the Analysis shows to be T2-sized goes on at T2 on that Analysis.
 | T2 | written by the lead | two: the checkpoint (Analysis summary of at most five lines and its Unknowns; Functional spec and Briefs still hold placeholders, Status stays `planning`), then the approval gate |
 | T3 and plan-only | written by the architect in its own stage (`exec.stage: "analysis"`), which fills the section from `state.analysis`; the pm and the planning architect then receive it | two, as at T2: the checkpoint, then the approval gate; a correction that needs code the architect did not read relaunches `analysis` with the correction in `exec.decisions`, and the stop is held again |
 
+At every tier each Unknown in the checkpoint comes with what would settle it and the
+lead's recommendation (the template's Unknowns placeholder says so).
+
 The step's outcome is written after a colon in the Steps list; from this version on only
 the confirmed mark is written:
 
@@ -214,6 +223,34 @@ the plan stage at T3; at T2 and T3 only after the analysis checkpoint), shows th
 spec, and waits. Status moves `planning` →
 `approved` on the user's word → `building` on launch. Pace governs only the pauses after
 build, review and finish.
+
+At the gate the lead tells the user they can switch the session to the mode that accepts
+edits without asking, and what will still wait for their word. That mode covers edits
+only: a shell command can still raise a permission prompt, which the user's own
+permission settings decide. The lead never changes the mode or a permission setting, and
+reminds the user to switch back when the run ends.
+
+### Branch, commits and push
+
+The branch is settled before the first edit, at every tier: in the preflight at T2 and
+above, in the T0 and T1 procedure before the edit (a T0 that only answers a question makes
+none). A dirty tree is asked about first and acted on before any switch, since a switch
+carries uncommitted work along; "commit it first" means on the current branch. On the
+default branch, or on a branch that belongs to another task, and only when
+`profile.git.branch_prefix` is set (without it there is no `<prefix>` and no proposal),
+the lead proposes `git switch --no-track -c <prefix><short-topic> <profile.base>`; `--no-track` keeps a
+remote-tracking base from becoming the upstream. A branch belongs to another task when
+another task's plan document names it on its `- **Branch:**` line (a run JSON leads to
+its document through `plan_doc`), or when its commits since `profile.base` serve another
+change. On such a branch the user may instead branch from the current commit
+(`git switch -c <prefix><short-topic>`) or stay; at T0 and T1 the user may also decline on
+the default branch.
+
+Commits stage files by name (`git add -- <path>…`), never the whole tree. After the last
+commit the lead asks, as a question of its own, whether to push (`git push -u <remote>
+<branch>`) and open the pull request; when a guardrail blocks something the user wants,
+such as rewriting history, the lead gives the exact commands with any secret or personal
+value left as a placeholder.
 
 ### What a workflow returns
 

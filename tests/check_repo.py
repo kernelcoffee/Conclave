@@ -65,6 +65,20 @@
   by pointing it at a tracked file, runs it in audit mode and maps each line onto a
   correction, and falls back by hand when the command is not found, the auditor reporting
   corrections since it has no `gaps`; the check is first run on known-bad variants as well;
+- lead.md states its standing rules once, in one `## Rules` section before `## Before
+  anything`: twelve numbered items with the expected bold titles in order, and no retired
+  passage that stated rules elsewhere; each rule, the T2 checkpoint stop, the preflight's
+  branch bullet, the approval gate, the Commit proposal with its separate push question and
+  the plan template's Unknowns placeholder carry what the acceptance names, and neither the
+  rules nor the Commit proposal name a hosting service; the first column of the README's
+  `## Rules` table holds the same titles in the same order; the checks are first run on
+  known-bad variants as well;
+- around those rules: the line that says how to read their order opens the section, no sentence
+  of a rule is restated word for word below it, every guardrail a rule or the README's
+  "Enforced by" column cites is a rule of guard.py, the README row of a rule names each
+  guardrail the rule cites and no row leaves "Enforced by" empty, and the continue skill's T2
+  resume prints each Unknown with what would settle it and the recommendation; the checks are
+  first run on known-bad variants as well;
 - with --base: if anything under plugins/ changed since <ref>, the version changed too,
   because installs from git are cached by version and `claude plugin update` does
   nothing for an unchanged version.
@@ -1860,6 +1874,679 @@ for problem in (link_check_script_problems(link_script.is_file(), os.access(link
 if len(errors) == errors_before_link_check:
     ok(f"{LINK_CHECK_NAME} ships executable and the docs-writer runs it as the acceptance names "
        f"({len(BAD_LINK_CHECK_SCRIPT) + len(BAD_LINK_CHECK_WRITER)} bad variants rejected)")
+
+
+# The lead's standing rules are stated once, in a numbered `## Rules` section near the top of
+# lead.md, which is the authority; the procedure sections say how to apply them. The titles and
+# their order are fixed (the first four always hold, the next seven follow the order in which a
+# task meets them, the last is about the lead's own work), the two passages that used to state
+# rules elsewhere stay gone, and each rule keeps what the acceptance criteria name. The procedure
+# sections that close a gap carry it too: the T2 checkpoint stop prints a recommendation with each
+# Unknown, the preflight proposes the branch from `profile.base` and covers another task's branch,
+# the approval gate gives the mode advice, and the Commit proposal stages files by name and asks
+# about the push in a paragraph of its own, after the commit question, naming no hosting service.
+# The README mirrors the list in a table for the user; its first column must hold the same titles
+# in the same order. Nothing executes these prompts, so the wording is guarded.
+README_REL = "README.md"
+PLAN_TEMPLATE_REL = "templates/plan.md"
+RULES_HEADING = "## Rules"
+RULES_BEFORE = "## Before anything"
+RULE_TITLES = ["Plan first", "Functional over technical", "The user's word", "Guardrails", "Small slices",
+               "Tier before tokens", "Branch", "Unknowns with a recommendation", "After approval", "Commits",
+               "Push and pull request", "Your own work"]
+RULE_ITEM = re.compile(r"^(\d+)\. \*\*(.+?)\.\*\* (.*)$")
+RETIRED_RULE_PASSAGES = ["Two rules sit above everything else"]
+# What each rule must still say, searched in its text after the bold title (A2 to A10).
+RULE_NEEDLES = {
+    "Plan first": ["approves the plan document", "at any tier above T0", "at any pace"],
+    "Functional over technical": ["The functional spec is the authority", "traces to no goal or acceptance criterion",
+                                  "candidate for a later task", "do not build it"],
+    "The user's word": ["only these", "confirming the Analysis", "approving the plan", "each decision",
+                        "the go after a stage at pace `step`", "creating a branch", "creating the commits",
+                        "pushing and opening the pull request", "a prompt a guardrail raises", "`commit-approval`",
+                        "`pii`", "every question a section below puts to the user", "Never guess an answer",
+                        "never reopened"],
+    "Guardrails": ["never work around one", "`CONCLAVE_ALLOW`", "rewriting history", "exact commands",
+                   "secret or personal value left as a placeholder"],
+    "Small slices": ["several independent changes", "separate tasks", "one at a time"],
+    "Tier before tokens": ["before spending", "after each stage", "more than half"],
+    "Branch": ["`profile.base`", "another task", "the default branch", "user's yes",
+               "branch from the current commit or to stay", "follow the answer", "before the first edit at every tier",
+               "a dirty tree is settled before any switch"],
+    "Unknowns with a recommendation": ["analysis checkpoint", "what would settle it", "recommendation"],
+    "After approval": ["approval gate", "accepts edits without asking", "still wait for their word",
+                       "a shell command can still raise a permission prompt", "switch back",
+                       "Never change the mode or a permission setting yourself"],
+    "Commits": ["Never run `git commit` without the user's approval", "`commit-approval`", "by name",
+                "never the whole tree", "Subagents never commit", "`subagent-no-git`"],
+    "Push and pull request": ["Never run `git push` without the user's approval", "`commit-approval`",
+                              "`protect-history`", "After the last commit", "separate question",
+                              "push the branch and open the pull request"],
+    "Your own work": ["No shortcuts", "the checklist the reviewers apply", "two or three sentences", "with the reason",
+                      "fix it as part of the task"],
+}
+# The line above the first rule that says how to read their order.
+READING_ORDER_NEEDLES = ["Rules 1 to 4", "rules 5 to 11", "rule 12"]
+# The procedure blocks that close a gap: (name, the start of the block in lead.md, what it must say).
+# The branch starts at `profile.base`, a remote-tracking ref by default; without `--no-track` that
+# ref becomes the new branch's upstream and a plain push aims at the default branch. The push then
+# sets the upstream itself.
+PUSH_PARAGRAPH = "After the last commit"
+PREFLIGHT_BRANCH = "- **Branch.**"
+PREFLIGHT_CLEAN_TREE = "- **Clean tree.**"
+APPROVAL_GATE = "**The approval gate.**"
+# The dirty tree is settled before the switch, or another task's uncommitted work follows onto the
+# new branch; a branch belongs to another task by the Branch line of its plan document (a run JSON
+# has no branch of its own); the user may keep stacked work on that branch; T0 and T1 settle the
+# branch before their first edit too, and the commit proposal catches a proposal not made yet.
+PROCEDURE_NEEDLES = [
+    ("the T2 checkpoint stop", "- At T2, stop:", ["what would settle it", "recommendation"]),
+    ("the test for another task's branch", "2. Read the task",
+     ["belongs to another task", "`- **Branch:**` line of another task's plan document", "`plan_doc`",
+      "`git log --oneline <profile.base>..HEAD`"]),
+    ("the preflight's clean-tree bullet", PREFLIGHT_CLEAN_TREE,
+     ["on the current branch", "before the *Branch* proposal", "before any switch"]),
+    ("the preflight's branch bullet", PREFLIGHT_BRANCH,
+     ["`profile.base`", "another task", "--no-track -c <prefix><short-topic> <profile.base>`",
+      "after the *Clean tree* answer", "`git switch -c <prefix><short-topic>`", "staying on it"]),
+    ("the T0 and T1 branch step", "4. Before the first edit",
+     ["settle the branch", "another task's branch", "dirty tree first", "say which branch you stay on"]),
+    ("the approval gate", APPROVAL_GATE, ["accepts edits without asking", "*The user's word*"]),
+    ("the push paragraph of the Commit proposal", PUSH_PARAGRAPH,
+     ["separate question", "`git push -u <remote> <branch>`", "no remote", "push alone",
+      "switch the permission mode back"]),
+]
+COMMIT_NEEDLES = ["by name", "never `git add -A`",
+                  "On the default branch or on another task's branch, make the proposal of the *Branch* rule first"]
+COMMIT_QUESTION = "wait for the user to approve"
+TEMPLATE_UNKNOWNS = "- <what is not known"
+HOSTING_NAMES = ["github", "gitlab", "bitbucket", "gitea", "`gh`", "`gh ", "`glab", "merge request"]
+# A sentence of a rule this long or longer that another rule repeats word for word is a rule stated twice.
+REPEATED_SENTENCE_MIN = 25
+
+
+def rule_items(lead_text):
+    """The (number, title, body) of each numbered item in the first `## Rules` section of lead_text,
+    with the lines that start an item but do not open with a bold title as (number, None, line)."""
+    rules = section([line.rstrip() for line in lead_text.splitlines()], RULES_HEADING)
+    items = []
+    for block in blocks("\n".join(rules or [])):
+        if not re.match(r"^\d+\. ", block):
+            continue
+        found = RULE_ITEM.match(block)
+        items.append((int(found.group(1)), found.group(2), found.group(3)) if found
+                     else (int(block.split(".", 1)[0]), None, block))
+    return items
+
+
+def rules_section_problems(lead_text):
+    """Every way lead.md breaks the layout of its standing rules, one message each."""
+    lines = [line.rstrip() for line in lead_text.splitlines()]
+    problems = []
+    count = lines.count(RULES_HEADING)
+    if count == 0:
+        return [f"{LEAD_REL}: no `{RULES_HEADING}` section"]
+    if count > 1:
+        problems.append(f"{LEAD_REL}: {count} `{RULES_HEADING}` sections; the standing rules are stated once")
+    if RULES_BEFORE not in lines:
+        problems.append(f"{LEAD_REL}: no `{RULES_BEFORE}` section to place `{RULES_HEADING}` before")
+    elif lines.index(RULES_HEADING) > lines.index(RULES_BEFORE):
+        problems.append(f"{LEAD_REL}: `{RULES_HEADING}` comes after `{RULES_BEFORE}`; the rules open the prompt")
+    items = rule_items(lead_text)
+    untitled = [number for number, title, _ in items if title is None]
+    if untitled:
+        problems.append(f"{LEAD_REL}: rule {', '.join(map(str, untitled))} does not open with a bold title "
+                        "(`N. **Title.** text`)")
+    numbers = [number for number, _, _ in items]
+    if numbers != list(range(1, len(numbers) + 1)):
+        problems.append(f"{LEAD_REL}: the rules are numbered {numbers}, not 1 to {len(numbers)}")
+    titles = [title for _, title, _ in items if title is not None]
+    missing = [t for t in RULE_TITLES if t not in titles]
+    unexpected = [t for t in titles if t not in RULE_TITLES]
+    repeated = sorted({t for t in titles if titles.count(t) > 1})
+    if missing or unexpected or repeated:
+        parts = [f"{label} {names}" for label, names in
+                 (("missing", missing), ("unexpected", unexpected), ("repeated", repeated)) if names]
+        problems.append(f"{LEAD_REL}: the `{RULES_HEADING}` titles differ from the expected {len(RULE_TITLES)}: "
+                        f"{', '.join(parts)}")
+    elif titles != RULE_TITLES:
+        problems.append(f"{LEAD_REL}: the `{RULES_HEADING}` titles are out of order: {titles}, expected {RULE_TITLES}")
+    for passage in RETIRED_RULE_PASSAGES:
+        if passage in lead_text:
+            problems.append(f"{LEAD_REL}: still says {passage!r}; the `{RULES_HEADING}` list states every rule")
+    return problems
+
+
+def rule_content_problems(texts):
+    """Every needle of RULE_NEEDLES, READING_ORDER_NEEDLES, PROCEDURE_NEEDLES, COMMIT_NEEDLES and the
+    template placeholder that the files (relative path -> text) no longer carry, a sentence two rules
+    both say, every hosting service the rules or the procedure blocks this task changed name, and a
+    push asked in the commit question, one message each."""
+    lead_text = texts[LEAD_REL]
+    problems = []
+    bodies = {title: body for _, title, body in rule_items(lead_text) if title is not None}
+    for title, needles in RULE_NEEDLES.items():
+        if title not in bodies:
+            continue
+        for needle in needles:
+            if needle not in bodies[title]:
+                problems.append(f"{LEAD_REL}: the rule *{title}* no longer says {needle!r}")
+    said_by = {}
+    for title, body in bodies.items():
+        for sentence in re.split(r"(?<=[.;:])\s+", body):
+            sentence = sentence.strip()
+            if len(sentence) < REPEATED_SENTENCE_MIN:
+                continue
+            first = said_by.setdefault(sentence, title)
+            if first != title:
+                problems.append(f"{LEAD_REL}: *{first}* and *{title}* both say {sentence!r}; state a rule once")
+
+    rules = "\n".join(section([line.rstrip() for line in lead_text.splitlines()], RULES_HEADING) or [])
+    reading = next((b for b in blocks(rules) if not re.match(r"^\d+\. ", b)), "")
+    for needle in READING_ORDER_NEEDLES:
+        if needle not in reading:
+            problems.append(f"{LEAD_REL}: the line above the first rule no longer says {needle!r} "
+                            "(how to read the order)")
+
+    commit = LEAD_COMMIT.search(lead_text)
+    commit_blocks = blocks(commit.group(1)) if commit else []
+    lead_blocks = blocks(lead_text)
+    for name, start, needles in PROCEDURE_NEEDLES:
+        pool = commit_blocks if start == PUSH_PARAGRAPH else lead_blocks
+        block = next((b for b in pool if b.startswith(start)), None)
+        if block is None:
+            why = (", so the push has no question of its own after the commit question"
+                   if start == PUSH_PARAGRAPH else "")
+            problems.append(f"{LEAD_REL}: no block starting {start!r} ({name}){why}")
+            continue
+        for needle in needles:
+            if needle not in block:
+                problems.append(f"{LEAD_REL}: {name} no longer says {needle!r}")
+    starts = [next((i for i, b in enumerate(lead_blocks) if b.startswith(start)), None)
+              for start in (PREFLIGHT_CLEAN_TREE, PREFLIGHT_BRANCH)]
+    if None not in starts and starts[0] > starts[1]:
+        problems.append(f"{LEAD_REL}: the preflight asks about the branch before the dirty tree; settle the tree "
+                        "before any switch")
+    if commit is None:
+        problems.append(f"{LEAD_REL}: no `## Commit proposal` section")
+    else:
+        for needle in COMMIT_NEEDLES:
+            if needle not in commit.group(1):
+                problems.append(f"{LEAD_REL}: the Commit proposal no longer says {needle!r}")
+        question = next((b for b in commit_blocks if COMMIT_QUESTION in b), None)
+        if question is None:
+            problems.append(f"{LEAD_REL}: the Commit proposal no longer says {COMMIT_QUESTION!r}")
+        elif re.search(r"\bpush", question, re.I):
+            problems.append(f"{LEAD_REL}: the Commit proposal asks about the push in the commit question; "
+                            "the push is a separate question after the last commit")
+
+    changed = [("the `## Rules` section", rules), ("the Commit proposal", commit.group(1) if commit else "")]
+    changed += [(name, next((b for b in lead_blocks if b.startswith(start)), ""))
+                for name, start, _ in PROCEDURE_NEEDLES if start in (PREFLIGHT_BRANCH, APPROVAL_GATE)]
+    for where, text in changed:
+        named = [n for n in HOSTING_NAMES if n in text.lower()]
+        if named:
+            problems.append(f"{LEAD_REL}: {where} names a hosting service or its tool ({', '.join(named)})")
+
+    placeholder = anchored_line(texts[PLAN_TEMPLATE_REL], TEMPLATE_UNKNOWNS)
+    if placeholder is None:
+        problems.append(f"{PLAN_TEMPLATE_REL}: no Unknowns placeholder starting {TEMPLATE_UNKNOWNS!r}")
+    elif "recommendation" not in placeholder:
+        problems.append(f"{PLAN_TEMPLATE_REL}: the Unknowns placeholder no longer names the lead's 'recommendation'")
+    return problems
+
+
+def readme_rule_rows(readme_text):
+    """The first cell of each data row of the table under `## Rules` in readme_text; None when the
+    section or its table is missing."""
+    rules = section([line.rstrip() for line in readme_text.splitlines()], RULES_HEADING)
+    rows = [line for line in rules or [] if line.startswith("|")]
+    separator = next((i for i, row in enumerate(rows) if re.fullmatch(r"\|[\s:|-]+\|", row)), None)
+    if separator is None:
+        return None
+    return [row.split("|")[1].strip() for row in rows[separator + 1:]]
+
+
+def rules_mirror_problems(lead_text, readme_text):
+    """Every way the README's `## Rules` table differs from the titles of lead.md, one message each."""
+    rows = readme_rule_rows(readme_text)
+    if rows is None:
+        return [f"{README_REL}: no table under `{RULES_HEADING}` to mirror the rules of {LEAD_REL}"]
+    titles = [title for _, title, _ in rule_items(lead_text) if title is not None]
+    problems = [f"{README_REL}: the `{RULES_HEADING}` table has no row for {t!r}, a rule of {LEAD_REL}"
+                for t in titles if t not in rows]
+    problems += [f"{README_REL}: the `{RULES_HEADING}` table has a row {r!r} that {LEAD_REL} lacks"
+                 for r in rows if r not in titles]
+    if not problems and rows != titles:
+        problems.append(f"{README_REL}: the `{RULES_HEADING}` rows {rows} differ in order or count from the rules "
+                        f"of {LEAD_REL} {titles}")
+    return problems
+
+
+GOOD_RULE_BODIES = {
+    "Plan first": "Nothing is built before the user approves the plan document, at any tier above T0 and at any pace.",
+    "Functional over technical": (
+        "The functional spec is the authority. Whatever traces to no goal or acceptance criterion is logged as a "
+        "candidate for a later task; do not build it."),
+    "The user's word": (
+        "Wait for the user's word on only these: confirming the Analysis, approving the plan, each decision, the go "
+        "after a stage at pace `step`, creating a branch, creating the commits, pushing and opening the pull "
+        "request, and a prompt a guardrail raises (`commit-approval`, `pii`). A decision is every question a "
+        "section below puts to the user. Never guess an answer; a decision is never reopened."),
+    "Guardrails": (
+        "A denial: never work around one; the user sets `CONCLAVE_ALLOW`. When one blocks rewriting history, give "
+        "the exact commands, any secret or personal value left as a placeholder."),
+    "Small slices": "A request with several independent changes is proposed as separate tasks, run one at a time.",
+    "Tier before tokens": "Say the tier before spending and the count after each stage; explain more than half over.",
+    "Branch": (
+        "Not on the default branch: propose one from `profile.base` on the user's yes. On another task's, offer to "
+        "branch from the current commit or to stay, and follow the answer; before the first edit at every tier, and "
+        "a dirty tree is settled before any switch."),
+    "Unknowns with a recommendation": (
+        "At the analysis checkpoint, each Unknown with what would settle it and your recommendation."),
+    "After approval": (
+        "At the approval gate, say the mode that accepts edits without asking and what will still wait for their "
+        "word; say that a shell command can still raise a permission prompt; switch back at the end. Never change "
+        "the mode or a permission setting yourself."),
+    "Commits": (
+        "Never run `git commit` without the user's approval; `commit-approval` asks. Stage by name, never the "
+        "whole tree. Subagents never commit; `subagent-no-git`."),
+    "Push and pull request": (
+        "Never run `git push` without the user's approval; `commit-approval` asks and `protect-history` guards the "
+        "default branch. After the last commit, a separate question: push the branch and open the pull request."),
+    "Your own work": (
+        "No shortcuts; the checklist the reviewers apply applies to you. Reports in two or three sentences, a "
+        "wrong finding with the reason, and fix it as part of the task when the profile is wrong."),
+}
+GOOD_RULES_PIECES = {
+    "opening": "You lead a team.\n\n",
+    "rules": RULES_HEADING + "\n\nRules 1 to 4 always hold, rules 5 to 11 follow the task, rule 12 is yours.\n\n",
+    "before": (f"{RULES_BEFORE}\n\n1. Read the profile.\n2. Read the task. A branch belongs to another task when "
+               "the `- **Branch:**` line of another task's plan document names it (via `plan_doc`) or by "
+               "`git log --oneline <profile.base>..HEAD`.\n\n"),
+    "preflight": ("## Preflight\n\n- **Clean tree.** Ask about a dirty tree, committing on the current branch, "
+                  "before the *Branch* proposal, acting before any switch.\n"
+                  "- **Branch.** Apply *Branch* after the *Clean tree* answer: from `profile.base`, also on another "
+                  "task, propose `git switch --no-track -c <prefix><short-topic> <profile.base>`, or "
+                  "`git switch -c <prefix><short-topic>` or staying on it.\n\n"),
+    "solo": ("## T0 and T1\n\n4. Before the first edit, settle the branch: on another task's branch, the dirty tree "
+             "first; else say which branch you stay on.\n\n"),
+    "checkpoint": "## The plan document\n\n- At T2, stop: the Unknowns, each with what would settle it and your "
+                  "recommendation.\n\n",
+    "gate": "**The approval gate.** Say they can switch to the mode that accepts edits without asking, and list the "
+            "items of *The user's word* still ahead.\n\n",
+    "commit": ("## Commit proposal\n\nOn the default branch or on another task's branch, make the proposal of the "
+               "*Branch* rule first. Stage each file by name, never `git add -A`. Show the messages and wait for the "
+               "user to approve.\n\n"),
+    "push": f"{PUSH_PARAGRAPH}, ask as a separate question, `git push -u <remote> <branch>`; skip it with no remote, "
+            "offer the push alone without a tool, then remind them to switch the permission mode back.\n",
+}
+GOOD_TEMPLATE_UNKNOWNS = f"### Unknowns\n\n{TEMPLATE_UNKNOWNS}, what would settle it, and the lead's recommendation>\n"
+
+
+def standing_lead(bodies=None, titles=None, **pieces):
+    """A lead.md built from the good pieces, with bodies, titles (the order of the list) and named
+    pieces replaced."""
+    bodies = {**GOOD_RULE_BODIES, **(bodies or {})}
+    parts = {**GOOD_RULES_PIECES, **pieces}
+    rules = "".join(f"{n}. **{t}.** {bodies.get(t, 'Text.')}\n" for n, t in enumerate(titles or RULE_TITLES, 1))
+    return (parts["opening"] + parts["rules"] + rules + "\n" + parts["before"] + parts["preflight"]
+            + parts["checkpoint"] + parts["gate"] + parts["solo"] + parts["commit"] + parts["push"])
+
+
+def standing_readme(rows=None):
+    lines = ["# Conclave", "", RULES_HEADING, "", "| Rule | What it means | Enforced by |", "|---|---|---|"]
+    lines += [f"| {row} | text | the lead |" for row in (RULE_TITLES if rows is None else rows)]
+    return "\n".join(lines + ["", "## Tiers", ""])
+
+
+def piece_without(name, needle):
+    assert needle in GOOD_RULES_PIECES[name], (name, needle)
+    return {name: GOOD_RULES_PIECES[name].replace(needle, "")}
+
+
+GOOD_STANDING = standing_lead()
+SWAPPED = RULE_TITLES[:4] + [RULE_TITLES[5], RULE_TITLES[4]] + RULE_TITLES[6:]
+BAD_RULES_SECTION = {
+    "a title removed": (standing_lead(titles=[t for t in RULE_TITLES if t != "Small slices"]), "'Small slices'"),
+    "a title renamed": (
+        standing_lead(titles=[("Approval" if t == "After approval" else t) for t in RULE_TITLES]),
+        "missing ['After approval'], unexpected ['Approval']"),
+    "a title repeated": (standing_lead(titles=RULE_TITLES + ["Commits"]), "repeated ['Commits']"),
+    "two titles swapped": (standing_lead(titles=SWAPPED), "out of order"),
+    "a second `## Rules` section at the end": (GOOD_STANDING + f"\n{RULES_HEADING}\n\n- Say the tier.\n",
+                                               "2 `## Rules` sections"),
+    "the section placed after `## Before anything`": (
+        standing_lead(opening=GOOD_RULES_PIECES["opening"] + GOOD_RULES_PIECES["before"], before=""),
+        "comes after `## Before anything`"),
+    "no `## Rules` section": (GOOD_STANDING.replace(RULES_HEADING, "## Principles"), "no `## Rules` section"),
+    # An item without a bold title has no title either, so the title it held is missing too.
+    "a rule without a bold title": (GOOD_STANDING.replace("5. **Small slices.**", "5. Small slices:"),
+                                    ["rule 5 does not open with a bold title", "missing ['Small slices']"]),
+    "the rules misnumbered": (GOOD_STANDING.replace("7. **Branch.**", "8. **Branch.**"), "numbered"),
+    "the two-rules paragraph still present": (
+        GOOD_STANDING.replace("You lead a team.", "You lead a team. Two rules sit above everything else."),
+        "still says 'Two rules sit above everything else'"),
+}
+BAD_RULE_CONTENT = {
+    f"*{title}* without {needle!r}": (
+        {LEAD_REL: standing_lead(bodies={title: GOOD_RULE_BODIES[title].replace(needle, "")}),
+         PLAN_TEMPLATE_REL: GOOD_TEMPLATE_UNKNOWNS},
+        f"the rule *{title}* no longer says {needle!r}")
+    for title, needles in RULE_NEEDLES.items() for needle in needles
+}
+for name, start, needles in PROCEDURE_NEEDLES:
+    piece = next(key for key, text in GOOD_RULES_PIECES.items() if start in text)
+    for needle in needles:
+        BAD_RULE_CONTENT[f"{name} without {needle!r}"] = (
+            {LEAD_REL: standing_lead(**piece_without(piece, needle)), PLAN_TEMPLATE_REL: GOOD_TEMPLATE_UNKNOWNS},
+            f"{name} no longer says {needle!r}")
+for needle in READING_ORDER_NEEDLES:
+    BAD_RULE_CONTENT[f"the reading-order line without {needle!r}"] = (
+        {LEAD_REL: standing_lead(**piece_without("rules", needle)), PLAN_TEMPLATE_REL: GOOD_TEMPLATE_UNKNOWNS},
+        f"the line above the first rule no longer says {needle!r}")
+for needle in COMMIT_NEEDLES:
+    BAD_RULE_CONTENT[f"the Commit proposal without {needle!r}"] = (
+        {LEAD_REL: standing_lead(**piece_without("commit", needle)), PLAN_TEMPLATE_REL: GOOD_TEMPLATE_UNKNOWNS},
+        f"the Commit proposal no longer says {needle!r}")
+BAD_RULE_CONTENT.update({
+    "the push asked in the commit question": (
+        {LEAD_REL: standing_lead(commit=GOOD_RULES_PIECES["commit"].replace(
+            "to approve.", "to approve the commits and the push."), push=""),
+         PLAN_TEMPLATE_REL: GOOD_TEMPLATE_UNKNOWNS},
+        "commit question"),
+    "the push paragraph merged into the commit question": (
+        {LEAD_REL: standing_lead(commit=GOOD_RULES_PIECES["commit"].rstrip("\n") + " "),
+         PLAN_TEMPLATE_REL: GOOD_TEMPLATE_UNKNOWNS},
+        "commit question"),
+    "a hosting service named in the rules": (
+        {LEAD_REL: standing_lead(bodies={"Push and pull request": GOOD_RULE_BODIES["Push and pull request"]
+                                         + " Open it on GitHub."}),
+         PLAN_TEMPLATE_REL: GOOD_TEMPLATE_UNKNOWNS},
+        "the `## Rules` section names a hosting service or its tool (github)"),
+    "a hosting service named in the preflight's branch bullet": (
+        {LEAD_REL: standing_lead(preflight=GOOD_RULES_PIECES["preflight"].replace("also on", "on GitLab, also on")),
+         PLAN_TEMPLATE_REL: GOOD_TEMPLATE_UNKNOWNS},
+        "the preflight's branch bullet names a hosting service or its tool (gitlab)"),
+    "the branch asked before the dirty tree": (
+        {LEAD_REL: standing_lead(preflight="\n".join(
+            [GOOD_RULES_PIECES["preflight"].splitlines()[i] for i in (0, 1, 3, 2)]) + "\n\n"),
+         PLAN_TEMPLATE_REL: GOOD_TEMPLATE_UNKNOWNS},
+        "asks about the branch before the dirty tree"),
+    "a hosting service named in the approval gate": (
+        {LEAD_REL: standing_lead(gate=GOOD_RULES_PIECES["gate"].replace("still ahead.", "still ahead on Bitbucket.")),
+         PLAN_TEMPLATE_REL: GOOD_TEMPLATE_UNKNOWNS},
+        "the approval gate names a hosting service or its tool (bitbucket)"),
+    "a sentence two rules both say": (
+        {LEAD_REL: standing_lead(bodies={
+            title: GOOD_RULE_BODIES[title] + " `protect-history` blocks a push to the default branch."
+            for title in ("Branch", "Push and pull request")}),
+         PLAN_TEMPLATE_REL: GOOD_TEMPLATE_UNKNOWNS},
+        "*Branch* and *Push and pull request* both say '`protect-history` blocks a push to the default branch.'"),
+    "a hosting tool named in the Commit proposal": (
+        {LEAD_REL: standing_lead(push=GOOD_RULES_PIECES["push"].replace("without a tool", "without `gh pr create`")),
+         PLAN_TEMPLATE_REL: GOOD_TEMPLATE_UNKNOWNS},
+        "the Commit proposal names a hosting service or its tool (`gh )"),
+    "the template placeholder without the recommendation": (
+        {LEAD_REL: GOOD_STANDING,
+         PLAN_TEMPLATE_REL: GOOD_TEMPLATE_UNKNOWNS.replace(", and the lead's recommendation", "")},
+        "no longer names the lead's 'recommendation'"),
+    "the template without the Unknowns placeholder": (
+        {LEAD_REL: GOOD_STANDING, PLAN_TEMPLATE_REL: "### Unknowns\n\n- (none)\n"}, "no Unknowns placeholder"),
+})
+LEAD_WITHOUT_SLICES = standing_lead(titles=[t for t in RULE_TITLES if t != "Small slices"])
+BAD_RULES_MIRROR = {
+    "a row missing from the README": (
+        (GOOD_STANDING, standing_readme([t for t in RULE_TITLES if t != "Branch"])), "no row for 'Branch'"),
+    "an extra row in the README": (
+        (GOOD_STANDING, standing_readme(RULE_TITLES + ["Be kind"])), "a row 'Be kind' that agents/lead.md lacks"),
+    "the README rows in another order": ((GOOD_STANDING, standing_readme(SWAPPED)), "differ in order"),
+    "a README row repeated": ((GOOD_STANDING, standing_readme(RULE_TITLES + ["Commits"])), "differ in order or count"),
+    "a rule missing from lead.md": (
+        (LEAD_WITHOUT_SLICES, standing_readme()), "a row 'Small slices' that agents/lead.md lacks"),
+    "a rule only in lead.md": (
+        (standing_lead(titles=RULE_TITLES + ["Be kind"]), standing_readme()), "no row for 'Be kind'"),
+    "no table in the README": ((GOOD_STANDING, f"# Conclave\n\n{RULES_HEADING}\n\nSee lead.md.\n"), "no table"),
+}
+
+errors_before_rules = len(errors)
+GOOD_RULE_TEXTS = {LEAD_REL: GOOD_STANDING, PLAN_TEMPLATE_REL: GOOD_TEMPLATE_UNKNOWNS}
+for problem in (rules_section_problems(GOOD_STANDING) + rule_content_problems(GOOD_RULE_TEXTS)
+                + rules_mirror_problems(GOOD_STANDING, standing_readme())):
+    fail(f"standing rules check rejects valid files: {problem}")
+for case, (text, expected) in BAD_RULES_SECTION.items():
+    got = rules_section_problems(text)
+    expected = [expected] if isinstance(expected, str) else expected
+    if len(got) != len(expected) or not all(e in p for e, p in zip(expected, got)):
+        fail(f"rules section check on {case}: expected problems containing {expected!r} in that order, got {got}")
+for case, (texts, expected) in BAD_RULE_CONTENT.items():
+    got = rule_content_problems(texts)
+    # Merging the push into the commit question both loses its paragraph and puts it in the question.
+    if case.startswith("the push"):
+        if not got or not all(expected in p for p in got):
+            fail(f"rule content check on {case}: expected problems containing {expected!r}, got {got}")
+    elif len(got) != 1 or expected not in got[0]:
+        fail(f"rule content check on {case}: expected one problem containing {expected!r}, got {got}")
+for case, ((lead, readme), expected) in BAD_RULES_MIRROR.items():
+    got = rules_mirror_problems(lead, readme)
+    if len(got) != 1 or expected not in got[0]:
+        fail(f"rules mirror check on {case}: expected one problem containing {expected!r}, got {got}")
+real_lead = (PLUGIN / LEAD_REL).read_text()
+for problem in (rules_section_problems(real_lead)
+                + rule_content_problems({LEAD_REL: real_lead,
+                                         PLAN_TEMPLATE_REL: (PLUGIN / PLAN_TEMPLATE_REL).read_text()})
+                + rules_mirror_problems(real_lead, (ROOT / README_REL).read_text())):
+    fail(problem)
+if len(errors) == errors_before_rules:
+    ok(f"lead.md states its {len(RULE_TITLES)} standing rules once, before `{RULES_BEFORE}`, with what the acceptance "
+       f"names, and the README's table mirrors them "
+       f"({len(BAD_RULES_SECTION) + len(BAD_RULE_CONTENT) + len(BAD_RULES_MIRROR)} bad variants rejected)")
+
+
+# Around the standing rules: the line that says how to read their order opens the section, above
+# the first rule; a sentence of a rule is not restated word for word in a procedure section (the
+# list is the only statement, the sections below say how); every guardrail a rule or the README's
+# "Enforced by" column cites is a rule guard.py has, under its existing name, and the README row of
+# a rule names every guardrail the rule in lead.md cites, so the user sees who enforces it; and the
+# continue skill, which restates what the T2 checkpoint stop prints on a resume, prints the
+# recommendation with each Unknown too.
+GUARD_REL = "hooks/guard.py"
+GUARD_RULES_START = "Rules (names used in the deny reason"
+GUARD_RULE_LINE = re.compile(r"^  ([a-z]+(?:-[a-z]+)*) {2,}\S", re.M)
+CITED_GUARD_RULE = re.compile(r"`([a-z]+(?:-[a-z]+)+|pii)`")
+ENFORCED_BY = "Enforced by"
+RESTATED_MIN = 40
+CONTINUE_REL = "skills/continue/SKILL.md"
+CONTINUE_T2_RESUME = "   - At T2 outside a plan-only run"
+CONTINUE_T2_NEEDLES = ["Unknowns", "what would settle it", "recommendation"]
+
+
+def guard_rule_names(guard_text):
+    """The rule names listed in guard.py's docstring, under its Rules heading."""
+    docstring = guard_text.split('"""')[1] if guard_text.count('"""') >= 2 else ""
+    rules = docstring.split(GUARD_RULES_START, 1)[1] if GUARD_RULES_START in docstring else ""
+    return set(GUARD_RULE_LINE.findall(rules.split("\nOverrides", 1)[0]))
+
+
+def rules_reading_line_problems(lead_text):
+    """A problem when the `## Rules` section does not open with the line that says how to read the
+    order, above the first rule."""
+    rules = section([line.rstrip() for line in lead_text.splitlines()], RULES_HEADING)
+    first = next(iter(blocks("\n".join(rules or []))), "")
+    if re.match(r"^\d+\. ", first) or not all(n in first for n in READING_ORDER_NEEDLES):
+        return [f"{LEAD_REL}: the `{RULES_HEADING}` section does not open with the line that says how to read "
+                "the order of the rules, above the first rule"]
+    return []
+
+
+def rules_restated_problems(lead_text):
+    """Every sentence of a rule that lead.md repeats word for word outside the `## Rules` section."""
+    lines = [line.rstrip() for line in lead_text.splitlines()]
+    rules = section(lines, RULES_HEADING)
+    if rules is None:
+        return []
+    start = lines.index(RULES_HEADING)
+    outside = " ".join(blocks("\n".join(lines[:start] + lines[start + 1 + len(rules):])))
+    problems = []
+    for _, title, body in rule_items(lead_text):
+        if title is None:
+            continue
+        for sentence in re.split(r"(?<=[.;:])\s+", body):
+            sentence = sentence.strip().rstrip(".;:")
+            if len(sentence) >= RESTATED_MIN and sentence in outside:
+                problems.append(f"{LEAD_REL}: the rule *{title}* is restated outside `{RULES_HEADING}`: "
+                                f"{sentence!r}; a procedure section says how, the list states the rule once")
+    return problems
+
+
+def readme_rule_table(readme_text):
+    """(header cells, data rows as cell lists) of the table under `## Rules` in readme_text; None
+    when the section or its table is missing."""
+    rules = section([line.rstrip() for line in readme_text.splitlines()], RULES_HEADING)
+    rows = [line for line in rules or [] if line.startswith("|")]
+    separator = next((i for i, row in enumerate(rows) if re.fullmatch(r"\|[\s:|-]+\|", row)), None)
+    if separator is None or separator == 0:
+        return None
+    cells = [[cell.strip() for cell in row.strip().strip("|").split("|")] for row in rows]
+    return cells[separator - 1], cells[separator + 1:]
+
+
+def rules_enforcement_problems(lead_text, readme_text, guard_names):
+    """Every guardrail name a rule of lead.md or the README's "Enforced by" column cites that guard.py
+    lacks, every README row whose "Enforced by" cell is empty, and every guardrail a rule of lead.md
+    cites that its README row does not name, one message each."""
+    table = readme_rule_table(readme_text)
+    if table is None:
+        return [f"{README_REL}: no table under `{RULES_HEADING}`"]
+    header, rows = table
+    if ENFORCED_BY not in header:
+        return [f"{README_REL}: the `{RULES_HEADING}` table has no {ENFORCED_BY!r} column"]
+    column = header.index(ENFORCED_BY)
+    enforced = {row[0]: (row[column] if len(row) > column else "") for row in rows}
+    problems = []
+    for title, cell in enforced.items():
+        if not cell:
+            problems.append(f"{README_REL}: the `{RULES_HEADING}` row {title!r} says nothing under {ENFORCED_BY!r}")
+        for name in CITED_GUARD_RULE.findall(cell):
+            if name not in guard_names:
+                problems.append(f"{README_REL}: the `{RULES_HEADING}` row {title!r} cites `{name}`, "
+                                f"which is no rule of {GUARD_REL}")
+    for _, title, body in rule_items(lead_text):
+        if title is None:
+            continue
+        for name in CITED_GUARD_RULE.findall(body):
+            if name not in guard_names:
+                problems.append(f"{LEAD_REL}: the rule *{title}* cites `{name}`, which is no rule of {GUARD_REL}")
+            elif title in enforced and f"`{name}`" not in enforced[title]:
+                problems.append(f"{README_REL}: the `{RULES_HEADING}` row {title!r} does not name `{name}`, "
+                                f"which the rule in {LEAD_REL} cites")
+    return problems
+
+
+def continue_checkpoint_problems(continue_text):
+    """A problem when the continue skill's T2 resume at the analysis checkpoint no longer prints the
+    Unknowns each with what would settle it and the recommendation."""
+    line = anchored_line(continue_text, CONTINUE_T2_RESUME)
+    if line is None:
+        return [f"{CONTINUE_REL}: no line starting {CONTINUE_T2_RESUME.strip()!r} (the T2 resume at the "
+                "analysis checkpoint)"]
+    return [f"{CONTINUE_REL}: the T2 resume at the analysis checkpoint no longer says {needle!r}"
+            for needle in CONTINUE_T2_NEEDLES if needle not in line]
+
+
+GOOD_GUARD = ('"""Guardrails.\n\nModes (first argument):\n  pre   PreToolUse   deny\n\n'
+              f"{GUARD_RULES_START} and in CONCLAVE_ALLOW):\n"
+              "  subagent-no-git      git commit from a subagent\n"
+              "                       continued text\n"
+              "  protect-history      push to the default branch\n"
+              "  commit-approval      ask first\n"
+              "  pii                  personal data\n\n"
+              'Overrides come from the environment:\n  CONCLAVE_ALLOW=rule,rule   skip\n"""\n')
+GOOD_GUARD_NAMES = guard_rule_names(GOOD_GUARD)
+ENFORCED_CELLS = {"The user's word": "the lead; `commit-approval` and `pii` raise the prompts",
+                  "Commits": "`commit-approval`, `subagent-no-git`",
+                  "Push and pull request": "`commit-approval`, `protect-history`"}
+
+
+def enforced_readme(cells=None, header="| Rule | What it means | Enforced by |"):
+    cells = {**ENFORCED_CELLS, **(cells or {})}
+    lines = ["# Conclave", "", RULES_HEADING, "", header, "|---|---|---|"]
+    lines += [f"| {title} | text | {cells.get(title, 'the lead')} |" for title in RULE_TITLES]
+    return "\n".join(lines + ["", "## Tiers", ""])
+
+
+GOOD_CONTINUE = (f"{CONTINUE_T2_RESUME}, when the step is unticked: show its summary and Unknowns, each with what "
+                 "would settle it and your recommendation, and wait.\n")
+GOOD_ENFORCED = enforced_readme()
+BAD_RULES_AROUND = {
+    "the reading-order line placed after the rules": (
+        "reading", standing_lead(rules=RULES_HEADING + "\n\n", before=GOOD_RULES_PIECES["rules"].split("\n\n", 1)[1]
+                                 + GOOD_RULES_PIECES["before"]),
+        "does not open with the line that says how to read"),
+    "a rule restated in a procedure section": (
+        "restated", standing_lead(gate=GOOD_RULES_PIECES["gate"] + "Stage each file by name. Never run `git push` "
+                                  "without the user's approval.\n\n"),
+        "the rule *Push and pull request* is restated outside `## Rules`"),
+    "a rule citing a guardrail guard.py lacks": (
+        "enforcement", standing_lead(bodies={"Commits": GOOD_RULE_BODIES["Commits"].replace(
+            "`subagent-no-git`", "`subagent-no-commit`")}),
+        "the rule *Commits* cites `subagent-no-commit`, which is no rule of hooks/guard.py"),
+    "a README row citing a guardrail guard.py lacks": (
+        "enforcement-readme", enforced_readme({"Branch": "the lead; `protect-branch`"}),
+        "the `## Rules` row 'Branch' cites `protect-branch`, which is no rule"),
+    "a README row with an empty Enforced by cell": (
+        "enforcement-readme", enforced_readme({"Small slices": ""}),
+        "the `## Rules` row 'Small slices' says nothing under 'Enforced by'"),
+    "a README row that drops a guardrail the rule cites": (
+        "enforcement-readme", enforced_readme({"Commits": "`commit-approval`"}),
+        "the `## Rules` row 'Commits' does not name `subagent-no-git`"),
+    "the README table without an Enforced by column": (
+        "enforcement-readme", enforced_readme(header="| Rule | What it means | Who |"),
+        "has no 'Enforced by' column"),
+    "the continue skill's T2 resume without the recommendation": (
+        "continue", GOOD_CONTINUE.replace(" and your recommendation", ""),
+        "no longer says 'recommendation'"),
+    "the continue skill's T2 resume without what would settle it": (
+        "continue", GOOD_CONTINUE.replace(" what would settle it and", ""),
+        "no longer says 'what would settle it'"),
+}
+
+
+def rules_around_problems(kind, text):
+    if kind == "reading":
+        return rules_reading_line_problems(text)
+    if kind == "restated":
+        return rules_restated_problems(text)
+    if kind == "enforcement":
+        return rules_enforcement_problems(text, GOOD_ENFORCED, GOOD_GUARD_NAMES)
+    if kind == "enforcement-readme":
+        return rules_enforcement_problems(GOOD_STANDING, text, GOOD_GUARD_NAMES)
+    return continue_checkpoint_problems(text)
+
+
+errors_before_around = len(errors)
+if GOOD_GUARD_NAMES != {"subagent-no-git", "protect-history", "commit-approval", "pii"}:
+    fail(f"guard rule names read from a known docstring: {sorted(GOOD_GUARD_NAMES)}")
+for problem in (rules_reading_line_problems(GOOD_STANDING) + rules_restated_problems(GOOD_STANDING)
+                + rules_enforcement_problems(GOOD_STANDING, GOOD_ENFORCED, GOOD_GUARD_NAMES)
+                + continue_checkpoint_problems(GOOD_CONTINUE)):
+    fail(f"standing rules surroundings check rejects valid files: {problem}")
+for case, (kind, text, expected) in BAD_RULES_AROUND.items():
+    got = rules_around_problems(kind, text)
+    if len(got) != 1 or expected not in got[0]:
+        fail(f"standing rules surroundings check on {case}: expected one problem containing {expected!r}, got {got}")
+real_guard_names = guard_rule_names((PLUGIN / GUARD_REL).read_text())
+if not {"commit-approval", "subagent-no-git", "protect-history", "pii"} <= real_guard_names:
+    fail(f"{GUARD_REL}: the rule names read from its docstring miss one the rules cite: {sorted(real_guard_names)}")
+real_readme = (ROOT / README_REL).read_text()
+for problem in (rules_reading_line_problems(real_lead) + rules_restated_problems(real_lead)
+                + rules_enforcement_problems(real_lead, real_readme, real_guard_names)
+                + continue_checkpoint_problems((PLUGIN / CONTINUE_REL).read_text())):
+    fail(problem)
+if len(errors) == errors_before_around:
+    ok(f"the rules open with how to read their order, are not restated below, cite only guardrails "
+       f"{GUARD_REL} has and the README names, and the continue skill prints the recommendation "
+       f"({len(BAD_RULES_AROUND)} bad variants rejected)")
 
 
 if "--base" in sys.argv:

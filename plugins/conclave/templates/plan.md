@@ -27,7 +27,7 @@ What the plan rests on, written before any solution so the user can check it aga
 
 ### Unknowns
 
-- <what is not known and what would settle it; "(none)" when nothing is open>
+- <what is not known, what would settle it, and the lead's recommendation; "(none)" when nothing is open>
 
 ## Functional spec
 
